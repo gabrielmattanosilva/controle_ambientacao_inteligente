@@ -5,100 +5,188 @@
 
 #include "ipc_uart.h"
 
-static HardwareSerial *g_uart = NULL;
+/* ---------- CRC16-CCITT (0xFFFF, poly 0x1021) ---------- */
 
-/* buffer de entrada mais amplo */
-static char   g_rx_buf[512];
-static size_t g_rx_len = 0;
-
-uint16_t crc16_ccitt(const uint8_t *data, size_t len)
+static uint16_t crc16_ccitt(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFF;
 
     for (size_t i = 0; i < len; i++) {
-        crc ^= ((uint16_t)data[i] << 8);
+        crc ^= (uint16_t)data[i] << 8;
         for (uint8_t b = 0; b < 8; b++) {
-            if (crc & 0x8000)
+            if (crc & 0x8000) {
                 crc = (crc << 1) ^ 0x1021;
-            else
+            } else {
                 crc <<= 1;
+            }
         }
     }
     return crc;
 }
 
-/* ---------------- init ---------------- */
+/* ---------- COBS encode/decode ---------- */
 
-void ipc_uart_begin(HardwareSerial *serial, uint32_t baud, int8_t tx_pin, int8_t rx_pin)
+static size_t cobs_encode(const uint8_t *input, size_t length,
+                          uint8_t *output, size_t out_size)
+{
+    if (!input || !output || out_size == 0) return 0;
+
+    const uint8_t *in  = input;
+    const uint8_t *end = input + length;
+
+    uint8_t *code_ptr = output;      // posição onde será escrito o "code"
+    uint8_t *out      = output + 1;  // onde começam os dados
+    uint8_t  code     = 1;
+
+    while (in < end) {
+        if (*in == 0) {
+            *code_ptr = code;
+            code_ptr  = out++;
+            code      = 1;
+        } else {
+            if ((size_t)(out - output) >= out_size) {
+                return 0; // overflow
+            }
+            *out++ = *in;
+            code++;
+            if (code == 0xFF) {
+                *code_ptr = code;
+                code_ptr  = out++;
+                code      = 1;
+            }
+        }
+        in++;
+    }
+
+    *code_ptr = code;
+
+    return (size_t)(out - output);
+}
+
+static size_t cobs_decode(const uint8_t *input, size_t length,
+                          uint8_t *output, size_t out_size)
+{
+    if (!input || !output) return 0;
+
+    const uint8_t *in  = input;
+    const uint8_t *end = input + length;
+    uint8_t *out       = output;
+
+    while (in < end) {
+        uint8_t code = *in++;
+        if (code == 0 || (in + code - 1) > end) {
+            return 0; // inválido
+        }
+
+        for (uint8_t i = 1; i < code; i++) {
+            if ((size_t)(out - output) >= out_size) {
+                return 0; // overflow
+            }
+            *out++ = *in++;
+        }
+
+        if (code < 0xFF && in < end) {
+            if ((size_t)(out - output) >= out_size) {
+                return 0;
+            }
+            *out++ = 0;
+        }
+    }
+
+    return (size_t)(out - output);
+}
+
+/* ---------- UART + buffer de recepção ---------- */
+
+static HardwareSerial *g_uart = nullptr;
+
+/* buffer de recepção bruto (COBS + CRC) */
+static uint8_t g_rx_buf[512];
+static size_t  g_rx_len = 0;
+
+void ipc_uart_begin(HardwareSerial *serial,
+                    uint32_t baud,
+                    int8_t tx_pin,
+                    int8_t rx_pin)
 {
     g_uart = serial;
-    g_uart->begin(baud, SERIAL_8N1, rx_pin, tx_pin);
+    if (g_uart) {
+        g_uart->begin(baud, SERIAL_8N1, rx_pin, tx_pin);
+    }
     g_rx_len = 0;
 }
 
-/* ---------------- envio ---------------- */
-
-void ipc_uart_send_json(const char *json)
+void ipc_uart_send_json(const char *json_str)
 {
-    if (!g_uart) return;
+    if (!g_uart || !json_str) return;
 
-    uint16_t crc = crc16_ccitt((const uint8_t*)json, strlen(json));
+    size_t json_len = strlen(json_str);
+    if (json_len == 0) return;
 
-    char frame[600];
-    snprintf(frame, sizeof(frame), "%s*%04X\n", json, (unsigned)crc);
+    /* payload = JSON + CRC16 (2 bytes) */
+    uint8_t raw[512];
+    if (json_len + 2 > sizeof(raw)) return;
 
-    g_uart->print(frame);
+    memcpy(raw, json_str, json_len);
+
+    uint16_t crc = crc16_ccitt((const uint8_t*)json_str, json_len);
+    raw[json_len]     = (uint8_t)((crc >> 8) & 0xFF); // high
+    raw[json_len + 1] = (uint8_t)(crc & 0xFF);        // low
+
+    /* COBS encode */
+    uint8_t enc[600];
+    size_t enc_len = cobs_encode(raw, json_len + 2, enc, sizeof(enc));
+    if (enc_len == 0) return;
+
+    /* Envia: COBS(payload) + 0x00 como delimitador */
+    g_uart->write(enc, enc_len);
+    g_uart->write((uint8_t)0x00);
 }
-
-/* ---------------- recepção ---------------- */
 
 bool ipc_uart_read_json(char *out_json, size_t maxlen)
 {
-    if (!g_uart) return false;
+    if (!g_uart || !out_json || maxlen == 0) return false;
 
-    while (g_uart->available()) {
-        char c = g_uart->read();
+    while (g_uart->available() > 0) {
+        uint8_t c = (uint8_t)g_uart->read();
 
-        if (c == '\n') {
-            /* fim da linha → tenta interpretar */
-            g_rx_buf[g_rx_len] = '\0';
-
-            char *star = strrchr(g_rx_buf, '*');
-            if (!star) {
-                g_rx_len = 0;
-                return false; /* sem CRC */
+        if (c == 0x00) {
+            /* fim de quadro */
+            if (g_rx_len == 0) {
+                // quadro vazio, ignora
+                continue;
             }
 
-            size_t json_len = (size_t)(star - g_rx_buf);
-            if (json_len >= maxlen) {
-                g_rx_len = 0;
+            /* decodifica COBS */
+            uint8_t dec[512];
+            size_t dec_len = cobs_decode(g_rx_buf, g_rx_len, dec, sizeof(dec));
+            g_rx_len = 0;
+
+            if (dec_len < 3) {
+                // muito pequeno: pelo menos 1 byte de dado + 2 de CRC
                 return false;
             }
 
-            char json_only[512];
-            memcpy(json_only, g_rx_buf, json_len);
-            json_only[json_len] = '\0';
+            size_t payload_len = dec_len - 2;
+            uint16_t crc_rx = ((uint16_t)dec[payload_len] << 8)
+                              | dec[payload_len + 1];
 
-            unsigned crc_rx = 0;
-            if (sscanf(star + 1, "%4X", &crc_rx) != 1) {
-                g_rx_len = 0;
-                return false; /* CRC inválido */
-            }
-
-            uint16_t crc_calc = crc16_ccitt((uint8_t*)json_only, json_len);
+            uint16_t crc_calc = crc16_ccitt(dec, payload_len);
             if (crc_calc != crc_rx) {
-                g_rx_len = 0;
-                return false; /* CRC errado */
+                // CRC inválido
+                return false;
             }
 
-            /* JSON válido, copia */
-            strcpy(out_json, json_only);
-            g_rx_len = 0;
-            return true;
-        }
+            if (payload_len >= maxlen) {
+                // JSON maior que o buffer de saída
+                return false;
+            }
 
-        if (c != '\r') {
-            if (g_rx_len < sizeof(g_rx_buf) - 1) {
+            memcpy(out_json, dec, payload_len);
+            out_json[payload_len] = '\0';
+            return true;
+        } else {
+            if (g_rx_len < sizeof(g_rx_buf)) {
                 g_rx_buf[g_rx_len++] = c;
             }
         }

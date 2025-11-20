@@ -1,6 +1,6 @@
 /**
  * @file main.cpp
- * @brief mesh_gateway_module – mock da rede mesh + bridge UART
+ * @brief Mesh Gateway Module
  */
 
 #include <Arduino.h>
@@ -8,8 +8,7 @@
 
 #include "pins.h"
 #include "ipc_uart.h"
-
-/* ---------------- Node IDs -------------------- */
+#include "mesh_proto.h"
 
 #define NODE_BLYNK_GW   "blynk-gw"
 #define NODE_MSH_GW     "msh-gw"
@@ -17,13 +16,12 @@
 #define NODE_INT_SEN    "int-sen-00"
 #define NODE_ACT        "act-00"
 
-/* ---------------- Estado interno ---------------- */
+/* --------- estado interno / timers --------- */
 
-static uint16_t g_msg_counter = 0;
-static unsigned long g_last_tele = 0;
-static unsigned long g_last_hb   = 0;
+static uint16_t      g_msg_counter = 0;
+static unsigned long g_last_tele   = 0;
+static unsigned long g_last_hb     = 0;
 
-/* Atuadores reais (mock) */
 static int  g_mode        = 0;
 static int  g_intake_pwm  = 0;
 static int  g_exhaust_pwm = 0;
@@ -32,7 +30,7 @@ static int  g_irrigation  = 0;
 static int  g_led_pwm     = 0;
 static char g_led_rgb[16] = "FFD480";
 
-/* ---------------- Helpers ---------------------- */
+/* --------- helpers --------- */
 
 static void gen_msg_id(char *buf, size_t len)
 {
@@ -41,156 +39,242 @@ static void gen_msg_id(char *buf, size_t len)
     snprintf(buf, len, "%04X", g_msg_counter);
 }
 
-static void send_doc(JsonDocument &doc)
+static void send_state_now()
 {
+    char id[8];
     char json[256];
-    serializeJson(doc, json, sizeof(json));
+    gen_msg_id(id, sizeof(id));
+
+    if (!mesh_proto_build_state_act(id,
+                                    (uint32_t)millis(),
+                                    0,  // QoS0 para state
+                                    NODE_ACT,
+                                    NODE_BLYNK_GW,
+                                    g_intake_pwm,
+                                    g_exhaust_pwm,
+                                    g_humidifier,
+                                    g_led_pwm,
+                                    g_led_rgb,
+                                    g_irrigation,
+                                    json,
+                                    sizeof(json))) {
+        return;
+    }
 
     ipc_uart_send_json(json);
-
-    Serial.print("[TX] ");
+    Serial.print("[TX STATE] ");
     Serial.println(json);
 }
 
-/* ---------------- Envio state ------------------ */
-
-static void send_state_now()
-{
-    JsonDocument doc;
-    JsonObject d;
-    char idb[8];
-
-    gen_msg_id(idb, sizeof(idb));
-    doc["id"]   = idb;
-    doc["ts"]   = (uint32_t)millis();
-    doc["qos"]  = 1;
-    doc["src"]  = NODE_ACT;
-    doc["dst"]  = NODE_BLYNK_GW;
-    doc["type"] = "state";
-
-    d = doc["data"].to<JsonObject>();
-    d["intake_pwm"]  = g_intake_pwm;
-    d["exhaust_pwm"] = g_exhaust_pwm;
-    d["humidifier"]  = g_humidifier;
-    d["led_brig"]    = g_led_pwm;
-    d["led_rgb"]     = g_led_rgb;
-    d["irrigation"]  = g_irrigation;
-
-    send_doc(doc);
-}
-
-/* ---------------- Telemetria mock ---------------- */
+/* --------- telemetria mock --------- */
 
 static void send_tele_dump()
 {
     JsonDocument doc;
-    JsonObject d;
-    char idb[8];
+    JsonObject   data;
+    char id[8];
+    char json[256];
 
-    /* externo */
-    gen_msg_id(idb, sizeof(idb));
+    /* tele externa (ext-sen-00) */
+    gen_msg_id(id, sizeof(id));
     doc.clear();
-    doc["id"]=idb; doc["ts"]=(uint32_t)millis(); doc["qos"]=0;
-    doc["src"]=NODE_EXT_SEN; doc["dst"]=NODE_BLYNK_GW; doc["type"]="tele";
-    d = doc["data"].to<JsonObject>();
-    d["t_out"]   = (float)(random(180,350))/10.0f;
-    d["rh_out"]  = (float)(random(300,900))/10.0f;
-    d["lux_out"] = random(0,50000);
-    send_doc(doc);
+    doc["id"]   = id;
+    doc["ts"]   = (uint32_t)millis();
+    doc["qos"]  = 0;
+    doc["src"]  = NODE_EXT_SEN;
+    doc["dst"]  = NODE_BLYNK_GW;
+    doc["type"] = "tele";
 
-    /* interno */
-    gen_msg_id(idb, sizeof(idb));
+    data = doc["data"].to<JsonObject>();
+    data["t_out"]   = (float)(random(180, 350)) / 10.0f;
+    data["rh_out"]  = (float)(random(300, 900)) / 10.0f;
+    data["lux_out"] = random(0, 50000);
+
+    serializeJson(doc, json, sizeof(json));
+    ipc_uart_send_json(json);
+    Serial.print("[TX TELE EXT] ");
+    Serial.println(json);
+
+    /* tele interna (int-sen-00) */
+    gen_msg_id(id, sizeof(id));
     doc.clear();
-    doc["id"]=idb; doc["ts"]=(uint32_t)millis(); doc["qos"]=0;
-    doc["src"]=NODE_INT_SEN; doc["dst"]=NODE_BLYNK_GW; doc["type"]="tele";
-    d = doc["data"].to<JsonObject>();
-    d["t_in"]       = (float)(random(180,350))/10.0f;
-    d["rh_in"]      = (float)(random(300,900))/10.0f;
-    d["soil_moist"] = random(20,100);
-    d["lux_in"]     = random(0,50000);
-    send_doc(doc);
+    doc["id"]   = id;
+    doc["ts"]   = (uint32_t)millis();
+    doc["qos"]  = 0;
+    doc["src"]  = NODE_INT_SEN;
+    doc["dst"]  = NODE_BLYNK_GW;
+    doc["type"] = "tele";
 
-    /* state (atuadores reais) */
+    data = doc["data"].to<JsonObject>();
+    data["t_in"]       = (float)(random(180, 350)) / 10.0f;
+    data["rh_in"]      = (float)(random(300, 900)) / 10.0f;
+    data["soil_moist"] = random(20, 100);
+    data["lux_in"]     = random(0, 50000);
+
+    serializeJson(doc, json, sizeof(json));
+    ipc_uart_send_json(json);
+    Serial.print("[TX TELE INT] ");
+    Serial.println(json);
+
+    /* state (atuadores) */
     send_state_now();
 }
 
-/* ---------------- Heartbeat -------------------- */
+/* --------- heartbeat --------- */
 
 static void send_hb()
 {
-    JsonDocument doc;
-    JsonObject d;
-    char idb[8];
+    char id[8];
+    char json[256];
 
-    gen_msg_id(idb, sizeof(idb));
-    doc["id"]=idb; doc["ts"]=(uint32_t)millis(); doc["qos"]=0;
-    doc["src"]=NODE_MSH_GW; doc["dst"]=NODE_BLYNK_GW; doc["type"]="hb";
+    gen_msg_id(id, sizeof(id));
 
-    d = doc["data"].to<JsonObject>();
-    d["uptime_s"] = (int)(millis()/1000);
-    d["rssi_dbm"] = -60;
-
-    send_doc(doc);
-}
-
-/* ---------------- Processar CFG ---------------- */
-
-static void handle_cfg(JsonObject d)
-{
-    if (d["mode"].is<long>())
-        g_mode = (int)d["mode"].as<long>();
-
-    if (d["intake_pwm"].is<long>())
-        g_intake_pwm = (int)d["intake_pwm"].as<long>();
-
-    if (d["exhaust_pwm"].is<long>())
-        g_exhaust_pwm = (int)d["exhaust_pwm"].as<long>();
-
-    if (d["humidifier"].is<long>())
-        g_humidifier = (int)d["humidifier"].as<long>();
-
-    if (d["irrigation"].is<long>())
-        g_irrigation = (int)d["irrigation"].as<long>();
-
-    if (d["led_pwm"].is<long>())
-        g_led_pwm = (int)d["led_pwm"].as<long>();
-
-    if (d["led_rgb"].is<const char*>())
-        strncpy(g_led_rgb, d["led_rgb"], sizeof(g_led_rgb)-1);
-
-    /* STATE imediato */
-    send_state_now();
-}
-
-/* ---------------- Processar JSON RX ---------------- */
-
-static void process_json(const char *json)
-{
-    JsonDocument doc;
-    if (deserializeJson(doc, json)) return;
-
-    const char *dst  = doc["dst"]  | "";
-    const char *type = doc["type"] | "";
-
-    if (strcmp(dst, NODE_MSH_GW)!=0 &&
-        strcmp(dst, "*")!=0)
+    if (!mesh_proto_build_hb(id,
+                             (uint32_t)millis(),
+                             NODE_MSH_GW,
+                             NODE_BLYNK_GW,
+                             (int)(millis() / 1000),
+                             -60,
+                             json,
+                             sizeof(json))) {
         return;
+    }
 
-    JsonObject data = doc["data"].as<JsonObject>();
-    if (!data) return;
-
-    if (!strcmp(type,"cfg"))
-        handle_cfg(data);
+    ipc_uart_send_json(json);
+    Serial.print("[TX HB] ");
+    Serial.println(json);
 }
 
-/* ---------------- setup / loop ---------------- */
+/* --------- aplicar CFG recebido --------- */
+
+static void apply_cfg(const mesh_msg_t &msg)
+{
+    if (msg.cfg.has_mode)
+        g_mode = msg.cfg.mode;
+
+    if (msg.cfg.has_intake_pwm)
+        g_intake_pwm = msg.cfg.intake_pwm;
+
+    if (msg.cfg.has_exhaust_pwm)
+        g_exhaust_pwm = msg.cfg.exhaust_pwm;
+
+    if (msg.cfg.has_humidifier)
+        g_humidifier = msg.cfg.humidifier;
+
+    if (msg.cfg.has_irrigation)
+        g_irrigation = msg.cfg.irrigation;
+
+    if (msg.cfg.has_led_pwm)
+        g_led_pwm = msg.cfg.led_pwm;
+
+    if (msg.cfg.has_led_rgb)
+        strncpy(g_led_rgb, msg.cfg.led_rgb, sizeof(g_led_rgb) - 1);
+
+    Serial.printf("[CFG] mode=%d, intake=%d, exhaust=%d, hum=%d, irr=%d, led_pwm=%d, led_rgb=%s\n",
+                  g_mode, g_intake_pwm, g_exhaust_pwm,
+                  g_humidifier, g_irrigation, g_led_pwm, g_led_rgb);
+
+    // após aplicar cfg, envia STATE imediato
+    send_state_now();
+
+    // se cfg era QoS1, envia ACK "ok" via lib
+    mesh_proto_qos_send_ack_ok(&msg);
+}
+
+/* --------- handlers extras (HELLO/EVT/TIME) --------- */
+
+static void handle_hello(const mesh_msg_t &msg)
+{
+    Serial.print("[HELLO RX] node_id=");
+    if (msg.hello.has_node_id) Serial.print(msg.hello.node_id);
+    Serial.print(" fw=");
+    if (msg.hello.has_fw_ver) Serial.print(msg.hello.fw_ver);
+    Serial.print(" extra=");
+    if (msg.hello.has_extra) Serial.print(msg.hello.extra);
+    Serial.println();
+}
+
+static void handle_evt(const mesh_msg_t &msg)
+{
+    Serial.print("[EVT RX] from=");
+    Serial.print(msg.src);
+    Serial.print(" event=");
+    if (msg.evt.has_event) Serial.print(msg.evt.event);
+    Serial.print(" code=");
+    if (msg.evt.has_code) Serial.print(msg.evt.code);
+    Serial.print(" level=");
+    if (msg.evt.has_level) Serial.print(msg.evt.level);
+    Serial.println();
+}
+
+static void handle_time(const mesh_msg_t &msg)
+{
+    Serial.print("[TIME RX] epoch=");
+    if (msg.time_sync.has_epoch) Serial.print(msg.time_sync.epoch);
+    Serial.print(" tz_offset_min=");
+    if (msg.time_sync.has_tz_offset_min) Serial.print(msg.time_sync.tz_offset_min);
+    Serial.println();
+
+    // futuro: ajustar RTC
+}
+
+/* --------- processar JSON recebido via UART --------- */
+
+static void handle_uart_json(const char *json)
+{
+    mesh_msg_t msg;
+    if (!mesh_proto_parse(json, &msg)) {
+        Serial.print("[RX] parse fail: ");
+        Serial.println(json);
+        return;
+    }
+
+    if (strcmp(msg.dst, NODE_MSH_GW) != 0 &&
+        strcmp(msg.dst, "*") != 0) {
+        return;
+    }
+
+    switch (msg.type) {
+    case MESH_MSG_CFG:
+        apply_cfg(msg);
+        break;
+
+    case MESH_MSG_HELLO:
+        handle_hello(msg);
+        break;
+
+    case MESH_MSG_EVT:
+        handle_evt(msg);
+        break;
+
+    case MESH_MSG_TIME:
+        handle_time(msg);
+        break;
+
+    case MESH_MSG_ACK:
+        // se um dia esse nó enviar QoS1 para outro, ACKs serão tratados aqui:
+        mesh_proto_qos_on_ack(&msg);
+        break;
+
+    default:
+        Serial.print("[RX] tipo não tratado: ");
+        Serial.println(msg.type);
+        break;
+    }
+}
+
+/* --------- setup / loop --------- */
 
 void setup()
 {
     Serial.begin(115200);
     delay(500);
+    Serial.println("[mesh_gateway_module] boot");
 
     ipc_uart_begin(&Serial2, 115200, UART_TX_PIN, UART_RX_PIN);
+
+    // QoS também inicializado aqui (mesmo que, por enquanto, só ACK seja usado)
+    mesh_proto_qos_init(ipc_uart_send_json);
 
     randomSeed(esp_random());
 }
@@ -211,8 +295,11 @@ void loop()
 
     char json[256];
     if (ipc_uart_read_json(json, sizeof(json))) {
-        Serial.print("[RX] ");
+        Serial.print("[RX JSON] ");
         Serial.println(json);
-        process_json(json);
+        handle_uart_json(json);
     }
+
+    // se este nó tiver mensagens QoS1 pendentes no futuro, o retry é tratado aqui
+    mesh_proto_qos_poll();
 }
