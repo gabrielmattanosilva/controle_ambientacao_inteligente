@@ -7,6 +7,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <BlynkSimpleEsp32.h>
+#include <time.h>
+#include <sys/time.h>
 
 #include "pins.h"
 #include "ipc_uart.h"
@@ -21,6 +23,43 @@
 static BlynkTimer g_timer;
 static uint16_t   g_msg_counter = 0;
 static int        g_mode        = 0;
+static bool       g_time_sync_ok = false;
+
+/**
+ * Aplica o TIME recebido do mesh_gateway_module ao RTC interno deste ESP32
+ * e só depois habilita o processamento de TELE/STATE/HB/EVT.
+ */
+static void apply_time_from_mesh(uint32_t epoch, int tz_offset_min)
+{
+    struct timeval tv;
+    tv.tv_sec  = (time_t)epoch;
+    tv.tv_usec = 0;
+
+    if (settimeofday(&tv, nullptr) != 0) {
+        Serial.println("[TIME] settimeofday() falhou");
+        return;
+    }
+
+    time_t t = (time_t)epoch;
+    struct tm tm_local;
+    localtime_r(&t, &tm_local);
+
+    Serial.printf("[TIME] RTC sincronizado: %04d-%02d-%02d %02d:%02d:%02d (tz_offset_min=%d)\n",
+                  tm_local.tm_year + 1900,
+                  tm_local.tm_mon + 1,
+                  tm_local.tm_mday,
+                  tm_local.tm_hour,
+                  tm_local.tm_min,
+                  tm_local.tm_sec,
+                  tz_offset_min);
+
+    // Marca que o tempo já foi sincronizado
+    g_time_sync_ok = true;
+
+    // Garante que o painel Blynk comece em modo AUTOMATICO (V13 = 1)
+    g_mode = 1;
+    Blynk.virtualWrite(V13, 1);
+}
 
 /* ---------- helpers ---------- */
 
@@ -42,7 +81,7 @@ static void send_cfg_int_field(const char *field, int value)
 
     if (!mesh_proto_build_cfg_int(id,
                                   (uint32_t)millis(),
-                                  1,               // QoS=1
+                                  1, // QoS1
                                   NODE_BLYNK_GW,
                                   NODE_MSH_GW,
                                   field,
@@ -67,7 +106,7 @@ static void send_cfg_str_field(const char *field, const char *value)
 
     if (!mesh_proto_build_cfg_str(id,
                                   (uint32_t)millis(),
-                                  1,               // QoS=1
+                                  1, // QoS1
                                   NODE_BLYNK_GW,
                                   NODE_MSH_GW,
                                   field,
@@ -89,41 +128,15 @@ BLYNK_CONNECTED()
 {
     Serial.println("[BLYNK] Connected, syncing V13..V19");
     Blynk.syncVirtual(V13, V14, V15, V16, V17, V18, V19);
-
-    // opcional: HELLO para mesh
-    char id[8], json[256];
-    gen_msg_id(id, sizeof(id));
-    if (mesh_proto_build_hello(id,
-                               (uint32_t)millis(),
-                               0,
-                               NODE_BLYNK_GW,
-                               NODE_MSH_GW,
-                               NODE_BLYNK_GW,
-                               "1.0.0",
-                               "blynk-gw boot",
-                               json,
-                               sizeof(json))) {
-        ipc_uart_send_json(json);
-        Serial.print("[TX HELLO] ");
-        Serial.println(json);
-    }
 }
 
 BLYNK_WRITE(V13)
 {
     g_mode = param.asInt() ? 1 : 0;
-    Serial.printf("[BLYNK] mode=%d\n", g_mode);
+    Serial.printf("[BLYNK] V13 (modo) = %d\n", g_mode);
     send_cfg_int_field("mode", g_mode);
 }
 
-/* Igual ao mock Python:
- * V14 = intake_pwm
- * V15 = exhaust_pwm
- * V16 = humidifier
- * V17 = led_pwm (led_brig)
- * V18 = led_rgb
- * V19 = irrigation
- */
 
 BLYNK_WRITE(V14)
 {
@@ -240,22 +253,22 @@ static void handle_evt(const mesh_msg_t &msg)
 
 static void handle_hello(const mesh_msg_t &msg)
 {
-    Serial.print("[HELLO] node_id=");
+    Serial.print("[HELLO] from=");
     if (msg.hello.has_node_id) Serial.print(msg.hello.node_id);
     Serial.print(" fw=");
     if (msg.hello.has_fw_ver) Serial.print(msg.hello.fw_ver);
-    Serial.print(" extra=");
-    if (msg.hello.has_extra) Serial.print(msg.hello.extra);
     Serial.println();
 }
 
 static void handle_time(const mesh_msg_t &msg)
 {
-    Serial.print("[TIME] epoch=");
-    if (msg.time_sync.has_epoch) Serial.print(msg.time_sync.epoch);
-    Serial.print(" tz_offset_min=");
-    if (msg.time_sync.has_tz_offset_min) Serial.print(msg.time_sync.tz_offset_min);
-    Serial.println();
+    if (!msg.time_sync.has_epoch) {
+        Serial.println("[TIME] recebido sem epoch valido");
+        return;
+    }
+
+    int tz = msg.time_sync.has_tz_offset_min ? msg.time_sync.tz_offset_min : 0;
+    apply_time_from_mesh(msg.time_sync.epoch, tz);
 }
 
 static void handle_mesh_json(const char *json)
@@ -272,13 +285,33 @@ static void handle_mesh_json(const char *json)
         return;
     }
 
+    // Responde ACK automático para qualquer mensagem QoS1 recebida
+    if (msg.qos == 1 && msg.type != MESH_MSG_ACK) {
+        mesh_proto_qos_send_ack_ok(&msg);
+    }
+
+    // ACK recebido limpa pendências de QoS deste próprio módulo
+    if (msg.type == MESH_MSG_ACK) {
+        mesh_proto_qos_on_ack(&msg);
+        return;
+    }
+
+    // Antes do TIME, ignoramos TELE/STATE/HB/EVT para nao poluir o Blynk
+    if (!g_time_sync_ok &&
+        (msg.type == MESH_MSG_TELE ||
+         msg.type == MESH_MSG_STATE ||
+         msg.type == MESH_MSG_HB   ||
+         msg.type == MESH_MSG_EVT)) {
+        Serial.println("[MESH] Ignorando TELE/STATE/HB/EVT antes de TIME sync");
+        return;
+    }
+
     switch (msg.type) {
     case MESH_MSG_TELE:   handle_tele(msg);          break;
     case MESH_MSG_STATE:  handle_state(msg);         break;
     case MESH_MSG_HB:     handle_hb(msg);            break;
     case MESH_MSG_EVT:    handle_evt(msg);           break;
     case MESH_MSG_HELLO:  handle_hello(msg);         break;
-    case MESH_MSG_ACK:    mesh_proto_qos_on_ack(&msg); break;
     case MESH_MSG_TIME:   handle_time(msg);          break;
     default:
         Serial.print("[MESH] tipo não tratado: ");
@@ -308,7 +341,9 @@ void setup()
         delay(250);
         Serial.print('.');
     }
-    Serial.println("\n[WiFi] Conectado");
+    Serial.println();
+    Serial.print("[WiFi] Conectado, IP=");
+    Serial.println(WiFi.localIP());
 
     Blynk.config(BLYNK_AUTH_TOKEN);
     Blynk.connect();
@@ -334,4 +369,3 @@ void loop()
     // gerenciador de QoS da lib
     mesh_proto_qos_poll();
 }
-

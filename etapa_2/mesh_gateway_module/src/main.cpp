@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <painlessMesh.h>
+#include <time.h>
 
 #include "credentials.h"
 #include "pins.h"
@@ -26,6 +27,83 @@ static Scheduler    userScheduler;
 static painlessMesh mesh;
 
 static const char *TAG = "MAIN";
+
+static uint16_t g_msg_counter = 0;
+static char     g_last_hello_id[8] = {0};
+
+/**
+ * Gera um ID de mensagem simples em formato hexadecimal de 4 dígitos.
+ */
+static void gen_msg_id(char *buf, size_t len)
+{
+    g_msg_counter++;
+    if (!g_msg_counter) g_msg_counter = 1;
+    snprintf(buf, len, "%04X", (unsigned)g_msg_counter);
+}
+
+/**
+ * Envia HELLO QoS1 para o blynk_gateway_module via UART.
+ */
+static void send_hello_to_blynk_gw()
+{
+    char id[8];
+    char json[256];
+
+    gen_msg_id(id, sizeof(id));
+
+    // guarda o ID para detectar o ACK correspondente
+    strncpy(g_last_hello_id, id, sizeof(g_last_hello_id) - 1);
+    g_last_hello_id[sizeof(g_last_hello_id) - 1] = '\0';
+
+    if (!mesh_proto_build_hello(id,
+                                (uint32_t)millis(),
+                                1,               // QoS1
+                                NODE_MSH_GW,
+                                NODE_BLYNK_GW,
+                                NODE_MSH_GW,
+                                "1.0.0",
+                                "mesh-gw boot",
+                                json,
+                                sizeof(json))) {
+        LOG(TAG, "Falha ao montar HELLO para blynk-gw");
+        return;
+    }
+
+    LOG(TAG, "Enviando HELLO QoS1 -> blynk-gw: %s", json);
+    mesh_proto_qos_register_and_send(id, json);
+}
+
+/**
+ * Envia TIME QoS1 para o blynk_gateway_module com base no RTC interno
+ * (já sincronizado pelo DS1307 na inicialização).
+ */
+static void send_time_to_blynk_gw()
+{
+    time_t now = time(nullptr);
+    // Ajuste se quiser outro fuso; aqui usamos -3h (BRT) como exemplo.
+    const int TZ_OFFSET_MIN = -3 * 60;
+
+    char id[8];
+    char json[256];
+
+    gen_msg_id(id, sizeof(id));
+
+    if (!mesh_proto_build_time(id,
+                               (uint32_t)millis(),
+                               1,               // QoS1
+                               NODE_MSH_GW,
+                               NODE_BLYNK_GW,
+                               (uint32_t)now,
+                               TZ_OFFSET_MIN,
+                               json,
+                               sizeof(json))) {
+        LOG(TAG, "Falha ao montar TIME para blynk-gw");
+        return;
+    }
+
+    LOG(TAG, "Enviando TIME QoS1 -> blynk-gw: %s", json);
+    mesh_proto_qos_register_and_send(id, json);
+}
 
 // -----------------------------------------------------------------------------
 // Funções auxiliares
@@ -57,6 +135,7 @@ static void forward_uart_to_mesh(const char *json)
  * Trata mensagens recebidas da UART (vindas do blynk_gateway_module).
  * - Faz o parse com mesh_proto_parse para poder filtrar por dst.
  * - Repassa para a mesh apenas o que estiver endereçado a NODE_MSH_GW ou "*".
+ * - Trata ACK vindo do blynk_gateway para gerenciar QoS (HELLO/TIME).
  */
 static void handle_uart_json(const char *json)
 {
@@ -75,24 +154,24 @@ static void handle_uart_json(const char *json)
         return;
     }
 
-    // Repassa qualquer tipo vindo do Blynk para a mesh
-    switch (msg.type)
+    // Mensagens ACK referem-se tipicamente a envios QoS1 (HELLO/TIME, etc.)
+    if (msg.type == MESH_MSG_ACK)
     {
-    case MESH_MSG_CFG:
-    case MESH_MSG_TIME:
-    case MESH_MSG_EVT:
-    case MESH_MSG_HELLO:
-    case MESH_MSG_STATE:
-    case MESH_MSG_TELE:
-    case MESH_MSG_HB:
-    case MESH_MSG_ACK:
-        forward_uart_to_mesh(json);
-        break;
+        // Atualiza gerenciador de QoS interno (HELLO/TIME)
+        mesh_proto_qos_on_ack(&msg);
 
-    default:
-        LOG("UART", "RX tipo nao tratado: %d", (int)msg.type);
-        break;
+        // Se este ACK for do nosso HELLO, dispara o envio de TIME QoS1
+        if (msg.ack.has_ref &&
+            strcmp(msg.ack.ref, g_last_hello_id) == 0)
+        {
+            LOG("UART", "ACK do HELLO recebido, enviando TIME QoS1");
+            send_time_to_blynk_gw();
+        }
+        return; // ACK nao e encaminhado para a mesh
     }
+
+    // Demais mensagens (CFG, EVT etc.) sao repassadas para a mesh
+    forward_uart_to_mesh(json);
 }
 
 /**
@@ -127,13 +206,14 @@ static void handle_mesh_json(const char *json)
 
 void mesh_receive_cb(uint32_t from, String &msg)
 {
-    LOG("MESH", "RX from %u: %s", (unsigned)from, msg.c_str());
+    LOG("MESH", "RX from %u: %s", (unsigned)from,
+        msg.c_str());
     handle_mesh_json(msg.c_str());
 }
 
 void mesh_new_connection_cb(uint32_t nodeId)
 {
-    LOG("MESH", "New connection, nodeId=%u", (unsigned)nodeId);
+    LOG("MESH", "New connection: %u", (unsigned)nodeId);
 }
 
 void mesh_changed_connections_cb()
@@ -172,6 +252,11 @@ void setup()
     // 3) Inicializa link UART (para blynk_gateway_module)
     ipc_uart_begin(&Serial2, 115200, UART_TX_PIN, UART_RX_PIN);
     LOG(TAG, "UART IPC inicializada (TX=%d, RX=%d)", UART_TX_PIN, UART_RX_PIN);
+    // Gerenciador de QoS da lib usando o mesmo transporte UART
+    mesh_proto_qos_init(ipc_uart_send_json);
+
+    // Envia HELLO QoS1 para o blynk_gateway assim que UART/QoS estiverem prontos
+    send_hello_to_blynk_gw();
 
     // 4) Inicializa rede mesh
     mesh.setDebugMsgTypes(ERROR | STARTUP);
@@ -181,7 +266,7 @@ void setup()
     mesh.onChangedConnections(&mesh_changed_connections_cb);
     mesh.onNodeTimeAdjusted(&mesh_time_adjusted_cb);
 
-    LOG(TAG, "mesh inicializada (prefix=\"%s\", port=%d)", MESH_PREFIX, MESH_PORT);
+    LOG(TAG, "mesh inicializada (prefix=%s, port=%d)", MESH_PREFIX, MESH_PORT);
 }
 
 void loop()
@@ -200,6 +285,6 @@ void loop()
         handle_uart_json(json);
     }
 
-    // Este módulo continua sem usar QoS diretamente.
-    // Portanto não há necessidade de chamar mesh_proto_qos_poll() aqui.
+    // Gerenciador de QoS da lib (HELLO/TIME QoS1 sobre UART)
+    mesh_proto_qos_poll();
 }
