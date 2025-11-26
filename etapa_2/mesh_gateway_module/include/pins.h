@@ -20,6 +20,6 @@
 #define SPI_MOSI    23
 
 /* Módulo de Cartão SD */
-#define SD_SPI_CS   4
+#define SD_SPI_CS   5
 
 #endif /* PINS_H */
