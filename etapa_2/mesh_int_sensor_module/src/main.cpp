@@ -26,6 +26,10 @@
 #define NODE_BLYNK_GW   "blynk-gw"
 #define NODE_MSH_GW     "msh-gw"
 
+// Escolha aqui quem é o "sink" principal das mensagens simuladas.
+// Se ainda estiver usando o blynk-gw direto na mesh, troque para NODE_BLYNK_GW.
+#define NODE_SINK       NODE_BLYNK_GW
+
 Scheduler userScheduler;
 static painlessMesh mesh;
 
@@ -40,9 +44,29 @@ static int  g_irrigation  = 0;
 static int  g_led_pwm     = 0;        // usado como "led_brig"
 static char g_led_rgb[16] = "0x000000";
 
-static uint16_t      g_msg_counter = 0;
-static unsigned long g_last_tele   = 0;
-static unsigned long g_last_hb     = 0;
+// -----------------------------------------------------------------------------
+// Estado simulado dos sensores (interno/externo)
+// -----------------------------------------------------------------------------
+static float g_t_in       = 25.0f;
+static float g_rh_in      = 60.0f;
+static int   g_soil_moist = 60;
+static int   g_lux_in     = 5000;
+
+static float g_t_out      = 27.0f;
+static float g_rh_out     = 55.0f;
+static int   g_lux_out    = 20000;
+
+// -----------------------------------------------------------------------------
+// Controle de envio / contadores
+// -----------------------------------------------------------------------------
+static uint16_t      g_msg_counter   = 0;
+static unsigned long g_last_tele     = 0;
+static unsigned long g_last_hb_all   = 0;
+static unsigned long g_last_state    = 0;
+
+// Novo: controla se já mandamos HELLO depois de conectar na mesh
+static bool          g_hello_sent    = false;
+
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -55,8 +79,22 @@ static void gen_msg_id(char *buf, size_t len)
     snprintf(buf, len, "%04X", g_msg_counter);
 }
 
+static float clampf(float v, float vmin, float vmax)
+{
+    if (v < vmin) return vmin;
+    if (v > vmax) return vmax;
+    return v;
+}
+
+static int clampi(int v, int vmin, int vmax)
+{
+    if (v < vmin) return vmin;
+    if (v > vmax) return vmax;
+    return v;
+}
+
 /**
- * Callback usado pela lib mesh_proto para enviar JSONs QoS1 (ACK, etc.)
+ * Callback usado pela lib mesh_proto para enviar JSONs QoS1 (ACK, EVT, etc.)
  * via rede mesh.
  */
 static void mesh_send_json_cb(const char *json)
@@ -69,7 +107,96 @@ static void mesh_send_json_cb(const char *json)
 }
 
 // -----------------------------------------------------------------------------
-// Envio de TELE / STATE / HB
+// Simulação de ambiente e atuadores
+// -----------------------------------------------------------------------------
+
+/**
+ * Atualiza suavemente os valores simulados de sensores.
+ * A ideia é ter uma evolução "lenta", em vez de saltos totalmente aleatórios.
+ */
+static void simulate_sensors_step()
+{
+    // Ambiente externo
+    g_t_out  += (float)random(-5, 6) / 10.0f;   // ±0.5 °C
+    g_rh_out += (float)random(-8, 9) / 10.0f;   // ±0.8 %
+    g_lux_out += random(-3000, 3001);          // ±3000 lux
+
+    g_t_out   = clampf(g_t_out,   18.0f, 36.0f);
+    g_rh_out  = clampf(g_rh_out,  30.0f, 90.0f);
+    g_lux_out = clampi(g_lux_out,     0, 60000);
+
+    // Ambiente interno "segue" algo próximo do externo, com ajustes
+    g_t_in  += (float)random(-4, 5) / 10.0f;    // ±0.4 °C
+    g_rh_in += (float)random(-7, 8) / 10.0f;    // ±0.7 %
+
+    g_t_in   = clampf(g_t_in,   20.0f, 34.0f);
+    g_rh_in  = clampf(g_rh_in,  35.0f, 95.0f);
+
+    g_soil_moist += random(-3, 4);             // ±3 %
+    g_soil_moist  = clampi(g_soil_moist, 20, 100);
+
+    g_lux_in += random(-2500, 2501);           // ±2500 lux
+    g_lux_in  = clampi(g_lux_in, 0, 40000);
+}
+
+/**
+ * Se o modo for AUTO, ajusta atuadores em função das variáveis internas.
+ * Isso deixa a simulação do act-00 mais condizente com o algoritmo
+ * que você pretende testar (ventilação, umidificação, irrigação, etc.).
+ */
+static void simulate_actuators_auto()
+{
+    if (g_mode != 0) {
+        // Em modo manual não mexemos nos atuadores aqui;
+        // eles são comandados via CFG.
+        return;
+    }
+
+    // Controle simples de temperatura (ventiladores)
+    if (g_t_in > 28.0f) {
+        g_intake_pwm  = 200;
+        g_exhaust_pwm = 200;
+    } else if (g_t_in < 24.0f) {
+        g_intake_pwm  = 0;
+        g_exhaust_pwm = 0;
+    } else {
+        g_intake_pwm  = 100;
+        g_exhaust_pwm = 100;
+    }
+
+    // Controle simples de umidade (umidificador)
+    if (g_rh_in < 50.0f) {
+        g_humidifier = 1;
+    } else if (g_rh_in > 70.0f) {
+        g_humidifier = 0;
+    }
+
+    // Controle simples de irrigação pelo solo
+    if (g_soil_moist < 40) {
+        g_irrigation = 1;
+    } else if (g_soil_moist > 70) {
+        g_irrigation = 0;
+    }
+
+    // Iluminação interna proporcional ao "lux_in" simulado
+    // (exemplo simples só pra variar um pouco)
+    if (g_lux_in < 2000) {
+        g_led_pwm = 255;
+    } else if (g_lux_in > 10000) {
+        g_led_pwm = 0;
+    } else {
+        // faixa intermediária: escala linear simples
+        float factor = (10000.0f - g_lux_in) / 8000.0f; // 1.0 → 0.0
+        int pwm = (int)(factor * 255.0f);
+        g_led_pwm = clampi(pwm, 0, 255);
+    }
+
+    // Cor fixa só pra ter algo no campo led_rgb
+    strncpy(g_led_rgb, "0x00FFAA", sizeof(g_led_rgb) - 1);
+}
+
+// -----------------------------------------------------------------------------
+// Envio de TELE / STATE / HB / HELLO
 // -----------------------------------------------------------------------------
 
 /**
@@ -84,6 +211,10 @@ static void send_tele_dump()
     char id[8];
     char json[256];
 
+    // Atualiza ambiente antes de enviar
+    simulate_sensors_step();
+    simulate_actuators_auto();
+
     // --- TELE externa (ext-sen-00) ---
     gen_msg_id(id, sizeof(id));
     doc.clear();
@@ -91,13 +222,13 @@ static void send_tele_dump()
     doc["ts"]   = (uint32_t)millis();
     doc["qos"]  = 0;
     doc["src"]  = NODE_EXT;
-    doc["dst"]  = NODE_BLYNK_GW;
+    doc["dst"]  = NODE_SINK;
     doc["type"] = "tele";
 
     data = doc["data"].to<JsonObject>();
-    data["t_out"]   = (float)(random(180, 350)) / 10.0f;   // 18.0 a 35.0 °C
-    data["rh_out"]  = (float)(random(300, 900)) / 10.0f;   // 30 a 90 %
-    data["lux_out"] = random(0, 50000);                   // 0 a 50k lux
+    data["t_out"]   = g_t_out;
+    data["rh_out"]  = g_rh_out;
+    data["lux_out"] = g_lux_out;
 
     serializeJson(doc, json, sizeof(json));
     mesh_send_json_cb(json);
@@ -109,14 +240,14 @@ static void send_tele_dump()
     doc["ts"]   = (uint32_t)millis();
     doc["qos"]  = 0;
     doc["src"]  = NODE_INT;
-    doc["dst"]  = NODE_BLYNK_GW;
+    doc["dst"]  = NODE_SINK;
     doc["type"] = "tele";
 
     data = doc["data"].to<JsonObject>();
-    data["t_in"]       = (float)(random(200, 320)) / 10.0f; // 20.0 a 32.0 °C
-    data["rh_in"]      = (float)(random(400, 950)) / 10.0f; // 40 a 95 %
-    data["soil_moist"] = random(20, 100);                  // 20 a 100 %
-    data["lux_in"]     = random(0, 30000);                 // 0 a 30k lux
+    data["t_in"]       = g_t_in;
+    data["rh_in"]      = g_rh_in;
+    data["soil_moist"] = g_soil_moist;
+    data["lux_in"]     = g_lux_in;
 
     serializeJson(doc, json, sizeof(json));
     mesh_send_json_cb(json);
@@ -137,7 +268,7 @@ static void send_state_now()
                                     (uint32_t)millis(),
                                     0,              // QoS0
                                     NODE_ACT,
-                                    NODE_BLYNK_GW,
+                                    NODE_SINK,
                                     g_intake_pwm,
                                     g_exhaust_pwm,
                                     g_humidifier,
@@ -153,9 +284,9 @@ static void send_state_now()
 }
 
 /**
- * Envia heartbeat simples para monitorar o nó simulador.
+ * Envia heartbeat de um nó lógico.
  */
-static void send_hb()
+static void send_hb_for(const char *node_id, int rssi_dbm)
 {
     char id[8];
     char json[256];
@@ -164,16 +295,78 @@ static void send_hb()
 
     if (!mesh_proto_build_hb(id,
                              (uint32_t)millis(),
-                             NODE_INT,          // podemos usar o INT como "nó base"
-                             NODE_BLYNK_GW,
+                             node_id,
+                             NODE_SINK,
                              (int)(millis() / 1000),
-                             -60,               // RSSI simulado
+                             rssi_dbm,
                              json,
                              sizeof(json))) {
         return;
     }
 
     mesh_send_json_cb(json);
+}
+
+/**
+ * Envia heartbeat de TODOS os nós simulados:
+ *   - int-sen-00
+ *   - ext-sen-00
+ *   - act-00
+ */
+static void send_hb_all()
+{
+    // Dá uma variada leve no RSSI só pra logs ficarem mais interessantes
+    int base_rssi = -60;
+    send_hb_for(NODE_INT, base_rssi + random(-3, 4));
+    send_hb_for(NODE_EXT, base_rssi + random(-3, 4));
+    send_hb_for(NODE_ACT, base_rssi + random(-3, 4));
+}
+
+/**
+ * Envia HELLO de um nó lógico (apresentação ao mesh_gateway).
+ * Agora:
+ *   - qos=1
+ *   - dst="msh-gw" (NODE_MSH_GW)
+ *   - usa o gerenciador de QoS (mesh_proto_qos_register_and_send)
+ */
+static void send_hello_for(const char *node_id,
+                           const char *fw_ver,
+                           const char *extra)
+{
+    char id[8];
+    char json[256];
+
+    gen_msg_id(id, sizeof(id));
+
+    if (!mesh_proto_build_hello(id,
+                                (uint32_t)millis(),
+                                1,              // QoS1
+                                node_id,        // src lógico
+                                NODE_MSH_GW,    // dst = mesh-gw
+                                node_id,
+                                fw_ver,
+                                extra,
+                                json,
+                                sizeof(json))) {
+        return;
+    }
+
+    // Tenta registrar no QoS (para ter retry automático).
+    // Se não houver slot, faz fallback para envio direto.
+    if (!mesh_proto_qos_register_and_send(id, json)) {
+        mesh_send_json_cb(json);
+    }
+}
+
+/**
+ * Envia HELLO de todos os nós simulados.
+ * Chamado uma vez após a mesh estar inicializada.
+ */
+static void send_hello_all()
+{
+    send_hello_for(NODE_INT, "1.0.0-sim", "internal sensors");
+    send_hello_for(NODE_EXT, "1.0.0-sim", "external sensors");
+    send_hello_for(NODE_ACT, "1.0.0-sim", "actuators");
 }
 
 // -----------------------------------------------------------------------------
@@ -207,10 +400,10 @@ static void apply_cfg(const mesh_msg_t &msg)
                   g_mode, g_intake_pwm, g_exhaust_pwm,
                   g_humidifier, g_irrigation, g_led_pwm, g_led_rgb);
 
-    // Após aplicar o cfg, envia STATE imediato para o Blynk
+    // Após aplicar o cfg, envia STATE imediato para o gateway
     send_state_now();
 
-    // Se cfg era QoS1, envia ACK "ok" via lib (ack vai pela mesh, volta ao Blynk via gateway)
+    // Se cfg era QoS1, envia ACK "ok" via lib (ack vai pela mesh)
     mesh_proto_qos_send_ack_ok(&msg);
 }
 
@@ -218,24 +411,29 @@ static void apply_cfg(const mesh_msg_t &msg)
 // Handlers de mensagens da mesh
 // -----------------------------------------------------------------------------
 
-/**
- * Processa uma mensagem JSON recebida pela mesh.
- * - Hoje nos importamos principalmente com CFG e TIME.
- */
 static void handle_mesh_json(const char *json)
 {
     mesh_msg_t msg;
     if (!mesh_proto_parse(json, &msg)) {
         Serial.print("[RX] parse fail: ");
-        Serial.println(json);
+        Serial.println(json ? json : "(null)");
         return;
     }
 
-    // Só processamos msgs destinadas ao gateway mesh ou a este nó (compatível
-    // com o cenário antigo em que dst="msh-gw").
+    // 1) ACK: SEMPRE avisar o gerenciador de QoS, independente do dst lógico
+    if (msg.type == MESH_MSG_ACK) {
+        mesh_proto_qos_on_ack(&msg);
+        Serial.printf("[RX ACK] ref=%s from=%s dst=%s\n",
+                      msg.ack.ref, msg.src, msg.dst);
+        return;  // não precisa fazer mais nada com o ACK
+    }
+
+    // 2) Demais tipos: aplica filtro de destino
     if (strcmp(msg.dst, NODE_MSH_GW) != 0 &&
         strcmp(msg.dst, NODE_ACT)    != 0 &&
-        strcmp(msg.dst, "*")        != 0) {
+        strcmp(msg.dst, NODE_INT)    != 0 &&
+        strcmp(msg.dst, NODE_EXT)    != 0 &&
+        strcmp(msg.dst, "*")         != 0) {
         Serial.printf("[RX] ignorado dst=%s\n", msg.dst);
         return;
     }
@@ -246,16 +444,17 @@ static void handle_mesh_json(const char *json)
         break;
 
     case MESH_MSG_TIME:
-        // Opcional: poderia fazer ajuste de RTC aqui se desejar
         Serial.println("[TIME] recebido (simulado, não aplicado)");
         break;
 
+    // NÃO precisa mais de case MESH_MSG_ACK aqui, já tratamos lá em cima
+
     default:
-        // Outros tipos (HELLO, EVT, TELE, STATE, HB, ACK) podem ser ignorados aqui
         Serial.printf("[RX] tipo não tratado=%d\n", msg.type);
         break;
     }
 }
+
 
 // -----------------------------------------------------------------------------
 // Callbacks da painlessMesh
@@ -270,6 +469,14 @@ void mesh_receive_cb(uint32_t from, String &msg)
 void mesh_new_connection_cb(uint32_t nodeId)
 {
     Serial.printf("[MESH] New connection, nodeId=%u\n", nodeId);
+
+    // Só envia HELLO uma vez, na primeira conexão com a rede mesh
+    if (!g_hello_sent) {
+        g_hello_sent = true;
+        Serial.println("[MESH] Primeira conexao estabelecida, enviando HELLO QoS1 de todos os nos simulados...");
+        send_hello_all();
+        send_state_now();
+    }
 }
 
 void mesh_changed_connections_cb()
@@ -290,7 +497,7 @@ void setup()
 {
     Serial.begin(115200);
     delay(500);
-    Serial.println("[int-sen-00] boot");
+    Serial.println("[int-sen-00-sim] boot");
 
     randomSeed(esp_random());
 
@@ -302,10 +509,24 @@ void setup()
     mesh.onChangedConnections(&mesh_changed_connections_cb);
     mesh.onNodeTimeAdjusted(&mesh_time_adjusted_cb);
 
-    // Inicializa QoS da lib (usado para enviar ACK de CFG)
+    // Inicializa QoS da lib (usado para enviar ACK de CFG e, se desejar, EVT QoS1)
     mesh_proto_qos_init(mesh_send_json_cb);
 
-    Serial.println("[int-sen-00] mesh inicializada");
+    // Estado inicial do ambiente (aleatoriza um pouco em torno dos defaults)
+    g_t_in       += (float)random(-10, 11) / 10.0f;
+    g_rh_in      += (float)random(-15, 16) / 10.0f;
+    g_soil_moist += random(-10, 11);
+    g_lux_in     += random(-3000, 3001);
+
+    g_t_out      += (float)random(-10, 11) / 10.0f;
+    g_rh_out     += (float)random(-15, 16) / 10.0f;
+    g_lux_out    += random(-5000, 5001);
+
+    g_soil_moist = clampi(g_soil_moist, 20, 100);
+    g_lux_in     = clampi(g_lux_in, 0, 40000);
+    g_lux_out    = clampi(g_lux_out, 0, 60000);
+
+    Serial.println("[int-sen-00-sim] mesh inicializada");
 }
 
 void loop()
@@ -314,18 +535,24 @@ void loop()
 
     unsigned long now = millis();
 
-    if (now - g_last_tele >= 60000UL) {
+    // TELE periódica de sensores (int + ext)
+    if (now - g_last_tele >= 60000UL) {   // 60 s
         g_last_tele = now;
         send_tele_dump();
     }
 
-    if (now - g_last_hb >= 10000UL) {
-        g_last_hb = now;
-        send_hb();
+    // STATE periódico dos atuadores (além do enviado em resposta ao CFG)
+    if (now - g_last_state >= 30000UL) {  // 30 s
+        g_last_state = now;
+        send_state_now();
     }
 
-    // Este nó só usa QoS para ACK, que é imediato; não há retry aqui.
-    // Se futuramente quiser enviar EVT QoS1, basta usar:
-    //   mesh_proto_qos_register_and_send(id, json);
-    // e chamar mesh_proto_qos_poll() aqui no loop.
+    // Heartbeat de todos os nós simulados
+    if (now - g_last_hb_all >= 10000UL) { // 10 s
+        g_last_hb_all = now;
+        send_hb_all();
+    }
+
+    // Gerenciador de QoS (retry de mensagens QoS1 que você venha a enviar)
+    mesh_proto_qos_poll();
 }
