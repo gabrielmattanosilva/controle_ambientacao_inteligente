@@ -37,7 +37,6 @@ static void gen_msg_id(char *buf, size_t len)
 
 /**
  * Aplica o TIME recebido do mesh_gateway_module ao RTC interno deste ESP32
- * e, como efeito colateral, força o painel para modo AUTOMÁTICO (V13 = 1).
  */
 static void apply_time_from_mesh(uint32_t epoch, int tz_offset_min)
 {
@@ -65,10 +64,11 @@ static void apply_time_from_mesh(uint32_t epoch, int tz_offset_min)
 
     g_time_sync_ok = true;
 
-    // Garante que o painel Blynk comece em modo AUTOMATICO (V13 = 1)
-    g_mode = 1;
-    Blynk.virtualWrite(V13, 1);
+    // Garante que o painel Blynk comece em modo AUTOMATICO (AUTO = 0)
+    g_mode = 0;
+    Blynk.virtualWrite(V13, 0);
 }
+
 
 /* ---------- envio CFG usando QoS da lib mesh_proto ---------- */
 
@@ -128,9 +128,16 @@ static void send_cfg_str_field(const char *field, const char *value)
 
 BLYNK_CONNECTED()
 {
-    Serial.println("[BLYNK] Connected, syncing V13..V19");
-    Blynk.syncVirtual(V13, V14, V15, V16, V17, V18, V19);
+    Serial.println("[BLYNK] Connected, syncing V14..V19");
+
+    // Não sincronizamos V13, ele é sempre comandado pelo firmware
+    Blynk.syncVirtual(V14, V15, V16, V17, V18, V19);
+
+    // Força valor default de modo (AUTO = 0) no painel a cada conexão
+    g_mode = 0;
+    Blynk.virtualWrite(V13, 0);
 }
+
 
 BLYNK_WRITE(V13)
 {
