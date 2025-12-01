@@ -9,25 +9,58 @@
 
 static mesh_msg_type_t type_from_str(const char *t)
 {
-    if (!t || !t[0]) return MESH_MSG_UNKNOWN;
-    if (!strcmp(t, "tele"))  return MESH_MSG_TELE;
-    if (!strcmp(t, "state")) return MESH_MSG_STATE;
-    if (!strcmp(t, "cfg"))   return MESH_MSG_CFG;
-    if (!strcmp(t, "hb"))    return MESH_MSG_HB;
-    if (!strcmp(t, "evt"))   return MESH_MSG_EVT;
-    if (!strcmp(t, "hello")) return MESH_MSG_HELLO;
-    if (!strcmp(t, "ack"))   return MESH_MSG_ACK;
-    if (!strcmp(t, "time"))  return MESH_MSG_TIME;
+    if (!t || !t[0])
+    {
+        return MESH_MSG_UNKNOWN;
+    }
+    if (!strcmp(t, "tele"))
+    {
+        return MESH_MSG_TELE;
+    }
+    if (!strcmp(t, "state"))
+    {
+        return MESH_MSG_STATE;
+    }
+    if (!strcmp(t, "cfg"))
+    {
+        return MESH_MSG_CFG;
+    }
+    if (!strcmp(t, "hb"))
+    {
+        return MESH_MSG_HB;
+    }
+    if (!strcmp(t, "evt"))
+    {
+        return MESH_MSG_EVT;
+    }
+    if (!strcmp(t, "hello"))
+    {
+        return MESH_MSG_HELLO;
+    }
+    if (!strcmp(t, "ack"))
+    {
+        return MESH_MSG_ACK;
+    }
+    if (!strcmp(t, "time"))
+    {
+        return MESH_MSG_TIME;
+    }
     return MESH_MSG_UNKNOWN;
 }
 
 static void safe_copy(char *dst, size_t dst_size, const char *src)
 {
-    if (!dst || dst_size == 0) return;
-    if (!src) {
+    if (!dst || dst_size == 0)
+    {
+        return;
+    }
+
+    if (!src)
+    {
         dst[0] = '\0';
         return;
     }
+
     strncpy(dst, src, dst_size - 1);
     dst[dst_size - 1] = '\0';
 }
@@ -38,207 +71,251 @@ static void safe_copy(char *dst, size_t dst_size, const char *src)
 
 bool mesh_proto_parse(const char *json_str, mesh_msg_t *out_msg)
 {
-    if (!json_str || !out_msg) return false;
+    if (!json_str || !out_msg)
+    {
+        return false;
+    }
 
     memset(out_msg, 0, sizeof(*out_msg));
 
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json_str);
-    if (err) {
+    if (err)
+    {
         return false;
     }
 
-    const char *id  = doc["id"]  | "";
-    uint32_t    ts  = doc["ts"]  | 0;
-    uint8_t     qos = doc["qos"] | 0;
+    const char *id = doc["id"] | "";
+    uint32_t ts = doc["ts"] | 0;
+    uint8_t qos = doc["qos"] | 0;
     const char *src = doc["src"] | "";
     const char *dst = doc["dst"] | "";
-    const char *typ = doc["type"]| "";
+    const char *typ = doc["type"] | "";
 
-    safe_copy(out_msg->id,  sizeof(out_msg->id),  id);
+    safe_copy(out_msg->id, sizeof(out_msg->id), id);
     safe_copy(out_msg->src, sizeof(out_msg->src), src);
     safe_copy(out_msg->dst, sizeof(out_msg->dst), dst);
-    out_msg->ts   = ts;
-    out_msg->qos  = qos;
+    out_msg->ts = ts;
+    out_msg->qos = qos;
     out_msg->type = type_from_str(typ);
 
     JsonObject data = doc["data"].as<JsonObject>();
-    if (!data) {
+    if (!data)
+    {
         return true; // header ok, sem data
     }
 
     /* TELE */
-    if (out_msg->type == MESH_MSG_TELE) {
-        if (data["t_out"].is<float>()) {
+    if (out_msg->type == MESH_MSG_TELE)
+    {
+        if (data["t_out"].is<float>())
+        {
             out_msg->tele.has_t_out = true;
             out_msg->tele.t_out = data["t_out"].as<float>();
         }
-        if (data["rh_out"].is<float>()) {
+        if (data["rh_out"].is<float>())
+        {
             out_msg->tele.has_rh_out = true;
             out_msg->tele.rh_out = data["rh_out"].as<float>();
         }
-        if (data["lux_out"].is<long>()) {
+        if (data["lux_out"].is<long>())
+        {
             out_msg->tele.has_lux_out = true;
             out_msg->tele.lux_out = (int)data["lux_out"].as<long>();
         }
-
-        if (data["t_in"].is<float>()) {
+        if (data["t_in"].is<float>())
+        {
             out_msg->tele.has_t_in = true;
             out_msg->tele.t_in = data["t_in"].as<float>();
         }
-        if (data["rh_in"].is<float>()) {
+        if (data["rh_in"].is<float>())
+        {
             out_msg->tele.has_rh_in = true;
             out_msg->tele.rh_in = data["rh_in"].as<float>();
         }
-        if (data["soil_moist"].is<long>()) {
+        if (data["soil_moist"].is<long>())
+        {
             out_msg->tele.has_soil_moist = true;
             out_msg->tele.soil_moist = (int)data["soil_moist"].as<long>();
         }
-        if (data["lux_in"].is<long>()) {
+        if (data["lux_in"].is<long>())
+        {
             out_msg->tele.has_lux_in = true;
             out_msg->tele.lux_in = (int)data["lux_in"].as<long>();
         }
     }
 
     /* STATE */
-    if (out_msg->type == MESH_MSG_STATE) {
-        if (data["intake_pwm"].is<long>()) {
+    if (out_msg->type == MESH_MSG_STATE)
+    {
+        if (data["intake_pwm"].is<long>())
+        {
             out_msg->state.has_intake_pwm = true;
             out_msg->state.intake_pwm = (int)data["intake_pwm"].as<long>();
         }
-        if (data["exhaust_pwm"].is<long>()) {
+        if (data["exhaust_pwm"].is<long>())
+        {
             out_msg->state.has_exhaust_pwm = true;
             out_msg->state.exhaust_pwm = (int)data["exhaust_pwm"].as<long>();
         }
-        if (data["humidifier"].is<long>()) {
+        if (data["humidifier"].is<long>())
+        {
             out_msg->state.has_humidifier = true;
             out_msg->state.humidifier = (int)data["humidifier"].as<long>();
         }
-        if (data["led_brig"].is<long>()) {
+        if (data["led_brig"].is<long>())
+        {
             out_msg->state.has_led_brig = true;
             out_msg->state.led_brig = (int)data["led_brig"].as<long>();
         }
-        if (data["led_rgb"].is<const char*>()) {
+        if (data["led_rgb"].is<const char *>())
+        {
             out_msg->state.has_led_rgb = true;
             safe_copy(out_msg->state.led_rgb,
                       sizeof(out_msg->state.led_rgb),
-                      data["led_rgb"].as<const char*>());
+                      data["led_rgb"].as<const char *>());
         }
-        if (data["irrigation"].is<long>()) {
+        if (data["irrigation"].is<long>())
+        {
             out_msg->state.has_irrigation = true;
             out_msg->state.irrigation = (int)data["irrigation"].as<long>();
         }
     }
 
     /* CFG */
-    if (out_msg->type == MESH_MSG_CFG) {
-        if (data["mode"].is<long>()) {
+    if (out_msg->type == MESH_MSG_CFG)
+    {
+        if (data["mode"].is<long>())
+        {
             out_msg->cfg.has_mode = true;
             out_msg->cfg.mode = (int)data["mode"].as<long>();
         }
-        if (data["intake_pwm"].is<long>()) {
+        if (data["intake_pwm"].is<long>())
+        {
             out_msg->cfg.has_intake_pwm = true;
             out_msg->cfg.intake_pwm = (int)data["intake_pwm"].as<long>();
         }
-        if (data["exhaust_pwm"].is<long>()) {
+        if (data["exhaust_pwm"].is<long>())
+        {
             out_msg->cfg.has_exhaust_pwm = true;
             out_msg->cfg.exhaust_pwm = (int)data["exhaust_pwm"].as<long>();
         }
-        if (data["humidifier"].is<long>()) {
+        if (data["humidifier"].is<long>())
+        {
             out_msg->cfg.has_humidifier = true;
             out_msg->cfg.humidifier = (int)data["humidifier"].as<long>();
         }
-        if (data["irrigation"].is<long>()) {
+        if (data["irrigation"].is<long>())
+        {
             out_msg->cfg.has_irrigation = true;
             out_msg->cfg.irrigation = (int)data["irrigation"].as<long>();
         }
-        if (data["led_pwm"].is<long>()) {
+        if (data["led_pwm"].is<long>())
+        {
             out_msg->cfg.has_led_pwm = true;
             out_msg->cfg.led_pwm = (int)data["led_pwm"].as<long>();
         }
-        if (data["led_rgb"].is<const char*>()) {
+        if (data["led_rgb"].is<const char *>())
+        {
             out_msg->cfg.has_led_rgb = true;
             safe_copy(out_msg->cfg.led_rgb,
                       sizeof(out_msg->cfg.led_rgb),
-                      data["led_rgb"].as<const char*>());
+                      data["led_rgb"].as<const char *>());
         }
     }
 
     /* HB */
-    if (out_msg->type == MESH_MSG_HB) {
-        if (data["uptime_s"].is<long>()) {
+    if (out_msg->type == MESH_MSG_HB)
+    {
+        if (data["uptime_s"].is<long>())
+        {
             out_msg->hb.has_uptime_s = true;
             out_msg->hb.uptime_s = (int)data["uptime_s"].as<long>();
         }
-        if (data["rssi_dbm"].is<long>()) {
+        if (data["rssi_dbm"].is<long>())
+        {
             out_msg->hb.has_rssi_dbm = true;
             out_msg->hb.rssi_dbm = (int)data["rssi_dbm"].as<long>();
         }
     }
 
     /* EVT */
-    if (out_msg->type == MESH_MSG_EVT) {
-        if (data["event"].is<const char*>()) {
+    if (out_msg->type == MESH_MSG_EVT)
+    {
+        if (data["event"].is<const char *>())
+        {
             out_msg->evt.has_event = true;
             safe_copy(out_msg->evt.event,
                       sizeof(out_msg->evt.event),
-                      data["event"].as<const char*>());
+                      data["event"].as<const char *>());
         }
-        if (data["code"].is<long>()) {
+        if (data["code"].is<long>())
+        {
             out_msg->evt.has_code = true;
             out_msg->evt.code = (int)data["code"].as<long>();
         }
-        if (data["level"].is<long>()) {
+        if (data["level"].is<long>())
+        {
             out_msg->evt.has_level = true;
             out_msg->evt.level = (int)data["level"].as<long>();
         }
     }
 
     /* HELLO */
-    if (out_msg->type == MESH_MSG_HELLO) {
-        if (data["node_id"].is<const char*>()) {
+    if (out_msg->type == MESH_MSG_HELLO)
+    {
+        if (data["node_id"].is<const char *>())
+        {
             out_msg->hello.has_node_id = true;
             safe_copy(out_msg->hello.node_id,
                       sizeof(out_msg->hello.node_id),
-                      data["node_id"].as<const char*>());
+                      data["node_id"].as<const char *>());
         }
-        if (data["fw_ver"].is<const char*>()) {
+        if (data["fw_ver"].is<const char *>())
+        {
             out_msg->hello.has_fw_ver = true;
             safe_copy(out_msg->hello.fw_ver,
                       sizeof(out_msg->hello.fw_ver),
-                      data["fw_ver"].as<const char*>());
+                      data["fw_ver"].as<const char *>());
         }
-        if (data["extra"].is<const char*>()) {
+        if (data["extra"].is<const char *>())
+        {
             out_msg->hello.has_extra = true;
             safe_copy(out_msg->hello.extra,
                       sizeof(out_msg->hello.extra),
-                      data["extra"].as<const char*>());
+                      data["extra"].as<const char *>());
         }
     }
 
     /* ACK */
-    if (out_msg->type == MESH_MSG_ACK) {
-        if (data["ref"].is<const char*>()) {
+    if (out_msg->type == MESH_MSG_ACK)
+    {
+        if (data["ref"].is<const char *>())
+        {
             out_msg->ack.has_ref = true;
             safe_copy(out_msg->ack.ref,
                       sizeof(out_msg->ack.ref),
-                      data["ref"].as<const char*>());
+                      data["ref"].as<const char *>());
         }
-        if (data["status"].is<const char*>()) {
+        if (data["status"].is<const char *>())
+        {
             out_msg->ack.has_status = true;
             safe_copy(out_msg->ack.status,
                       sizeof(out_msg->ack.status),
-                      data["status"].as<const char*>());
+                      data["status"].as<const char *>());
         }
     }
 
     /* TIME */
-    if (out_msg->type == MESH_MSG_TIME) {
-        if (data["epoch"].is<long>()) {
+    if (out_msg->type == MESH_MSG_TIME)
+    {
+        if (data["epoch"].is<long>())
+        {
             out_msg->time_sync.has_epoch = true;
             out_msg->time_sync.epoch = (uint32_t)data["epoch"].as<long>();
         }
-        if (data["tz_offset_min"].is<long>()) {
+        if (data["tz_offset_min"].is<long>())
+        {
             out_msg->time_sync.has_tz_offset_min = true;
             out_msg->time_sync.tz_offset_min = (int)data["tz_offset_min"].as<long>();
         }
@@ -254,9 +331,17 @@ bool mesh_proto_parse(const char *json_str, mesh_msg_t *out_msg)
 static bool serialize_doc(JsonDocument &doc,
                           char *out_json, size_t maxlen)
 {
-    if (!out_json || maxlen == 0) return false;
+    if (!out_json || maxlen == 0)
+    {
+        return false;
+    }
+
     size_t n = serializeJson(doc, out_json, maxlen);
-    if (n == 0 || n >= maxlen) return false;
+
+    if (n == 0 || n >= maxlen)
+    {
+        return false;
+    }
     return true;
 }
 
@@ -271,11 +356,11 @@ bool mesh_proto_build_cfg_int(const char *id,
                               size_t maxlen)
 {
     JsonDocument doc;
-    doc["id"]   = id  ? id  : "";
-    doc["ts"]   = ts;
-    doc["qos"]  = qos;
-    doc["src"]  = src ? src : "";
-    doc["dst"]  = dst ? dst : "";
+    doc["id"] = id ? id : "";
+    doc["ts"] = ts;
+    doc["qos"] = qos;
+    doc["src"] = src ? src : "";
+    doc["dst"] = dst ? dst : "";
     doc["type"] = "cfg";
 
     JsonObject data = doc["data"].to<JsonObject>();
@@ -295,11 +380,11 @@ bool mesh_proto_build_cfg_str(const char *id,
                               size_t maxlen)
 {
     JsonDocument doc;
-    doc["id"]   = id  ? id  : "";
-    doc["ts"]   = ts;
-    doc["qos"]  = qos;
-    doc["src"]  = src ? src : "";
-    doc["dst"]  = dst ? dst : "";
+    doc["id"] = id ? id : "";
+    doc["ts"] = ts;
+    doc["qos"] = qos;
+    doc["src"] = src ? src : "";
+    doc["dst"] = dst ? dst : "";
     doc["type"] = "cfg";
 
     JsonObject data = doc["data"].to<JsonObject>();
@@ -323,20 +408,20 @@ bool mesh_proto_build_state_act(const char *id,
                                 size_t maxlen)
 {
     JsonDocument doc;
-    doc["id"]   = id  ? id  : "";
-    doc["ts"]   = ts;
-    doc["qos"]  = qos;
-    doc["src"]  = src ? src : "";
-    doc["dst"]  = dst ? dst : "";
+    doc["id"] = id ? id : "";
+    doc["ts"] = ts;
+    doc["qos"] = qos;
+    doc["src"] = src ? src : "";
+    doc["dst"] = dst ? dst : "";
     doc["type"] = "state";
 
     JsonObject data = doc["data"].to<JsonObject>();
-    data["intake_pwm"]  = intake_pwm;
+    data["intake_pwm"] = intake_pwm;
     data["exhaust_pwm"] = exhaust_pwm;
-    data["humidifier"]  = humidifier;
-    data["led_brig"]    = led_brig;
-    data["led_rgb"]     = led_rgb ? led_rgb : "";
-    data["irrigation"]  = irrigation;
+    data["humidifier"] = humidifier;
+    data["led_brig"] = led_brig;
+    data["led_rgb"] = led_rgb ? led_rgb : "";
+    data["irrigation"] = irrigation;
 
     return serialize_doc(doc, out_json, maxlen);
 }
@@ -351,11 +436,11 @@ bool mesh_proto_build_hb(const char *id,
                          size_t maxlen)
 {
     JsonDocument doc;
-    doc["id"]   = id  ? id  : "";
-    doc["ts"]   = ts;
-    doc["qos"]  = 0;
-    doc["src"]  = src ? src : "";
-    doc["dst"]  = dst ? dst : "";
+    doc["id"] = id ? id : "";
+    doc["ts"] = ts;
+    doc["qos"] = 0;
+    doc["src"] = src ? src : "";
+    doc["dst"] = dst ? dst : "";
     doc["type"] = "hb";
 
     JsonObject data = doc["data"].to<JsonObject>();
@@ -375,15 +460,15 @@ bool mesh_proto_build_ack(const char *id,
                           size_t maxlen)
 {
     JsonDocument doc;
-    doc["id"]   = id  ? id  : "";
-    doc["ts"]   = ts;
-    doc["qos"]  = 0;  // ACK normalmente QoS 0
-    doc["src"]  = src ? src : "";
-    doc["dst"]  = dst ? dst : "";
+    doc["id"] = id ? id : "";
+    doc["ts"] = ts;
+    doc["qos"] = 0; // ACK normalmente QoS 0
+    doc["src"] = src ? src : "";
+    doc["dst"] = dst ? dst : "";
     doc["type"] = "ack";
 
     JsonObject data = doc["data"].to<JsonObject>();
-    data["ref"]    = ref    ? ref    : "";
+    data["ref"] = ref ? ref : "";
     data["status"] = status ? status : "ok";
 
     return serialize_doc(doc, out_json, maxlen);
@@ -401,17 +486,17 @@ bool mesh_proto_build_hello(const char *id,
                             size_t maxlen)
 {
     JsonDocument doc;
-    doc["id"]   = id  ? id  : "";
-    doc["ts"]   = ts;
-    doc["qos"]  = qos;
-    doc["src"]  = src ? src : "";
-    doc["dst"]  = dst ? dst : "";
+    doc["id"] = id ? id : "";
+    doc["ts"] = ts;
+    doc["qos"] = qos;
+    doc["src"] = src ? src : "";
+    doc["dst"] = dst ? dst : "";
     doc["type"] = "hello";
 
     JsonObject data = doc["data"].to<JsonObject>();
     data["node_id"] = node_id ? node_id : "";
-    data["fw_ver"]  = fw_ver  ? fw_ver  : "";
-    data["extra"]   = extra   ? extra   : "";
+    data["fw_ver"] = fw_ver ? fw_ver : "";
+    data["extra"] = extra ? extra : "";
 
     return serialize_doc(doc, out_json, maxlen);
 }
@@ -428,16 +513,16 @@ bool mesh_proto_build_evt(const char *id,
                           size_t maxlen)
 {
     JsonDocument doc;
-    doc["id"]   = id  ? id  : "";
-    doc["ts"]   = ts;
-    doc["qos"]  = qos;
-    doc["src"]  = src ? src : "";
-    doc["dst"]  = dst ? dst : "";
+    doc["id"] = id ? id : "";
+    doc["ts"] = ts;
+    doc["qos"] = qos;
+    doc["src"] = src ? src : "";
+    doc["dst"] = dst ? dst : "";
     doc["type"] = "evt";
 
     JsonObject data = doc["data"].to<JsonObject>();
     data["event"] = event ? event : "";
-    data["code"]  = code;
+    data["code"] = code;
     data["level"] = level;
 
     return serialize_doc(doc, out_json, maxlen);
@@ -454,15 +539,15 @@ bool mesh_proto_build_time(const char *id,
                            size_t maxlen)
 {
     JsonDocument doc;
-    doc["id"]   = id  ? id  : "";
-    doc["ts"]   = ts;
-    doc["qos"]  = qos;
-    doc["src"]  = src ? src : "";
-    doc["dst"]  = dst ? dst : "";
+    doc["id"] = id ? id : "";
+    doc["ts"] = ts;
+    doc["qos"] = qos;
+    doc["src"] = src ? src : "";
+    doc["dst"] = dst ? dst : "";
     doc["type"] = "time";
 
     JsonObject data = doc["data"].to<JsonObject>();
-    data["epoch"]         = epoch;
+    data["epoch"] = epoch;
     data["tz_offset_min"] = tz_offset_min;
 
     return serialize_doc(doc, out_json, maxlen);
@@ -472,41 +557,47 @@ bool mesh_proto_build_time(const char *id,
  * QoS MANAGER (dentro da lib)
  * ============================================================ */
 
-#define MESH_QOS_TIMEOUT_MS   1000UL
-#define MESH_QOS_MAX_RETRIES  3
-#define MESH_QOS_MAX_PENDING  4
+#define MESH_QOS_TIMEOUT_MS 1000UL
+#define MESH_QOS_MAX_RETRIES 3
+#define MESH_QOS_MAX_PENDING 4
 
-typedef struct {
-    bool     used;
-    char     id[8];
-    char     json[256];
-    uint8_t  retries;
+typedef struct
+{
+    bool used;
+    char id[8];
+    char json[256];
+    uint8_t retries;
     uint32_t last_send_ms;
 } mesh_qos_pending_t;
 
-static mesh_qos_pending_t   g_qos_pending[MESH_QOS_MAX_PENDING];
+static mesh_qos_pending_t g_qos_pending[MESH_QOS_MAX_PENDING];
 static mesh_proto_send_cb_t g_qos_send_cb = nullptr;
-static uint16_t             g_qos_id_counter = 0;
+static uint16_t g_qos_id_counter = 0;
 
 static void qos_gen_id(char *buf, size_t len)
 {
     g_qos_id_counter++;
-    if (!g_qos_id_counter) g_qos_id_counter = 1;
+    if (!g_qos_id_counter)
+        g_qos_id_counter = 1;
     snprintf(buf, len, "%04X", g_qos_id_counter);
 }
 
-static mesh_qos_pending_t* qos_find_free_slot()
+static mesh_qos_pending_t *qos_find_free_slot()
 {
-    for (int i = 0; i < MESH_QOS_MAX_PENDING; ++i) {
-        if (!g_qos_pending[i].used) return &g_qos_pending[i];
+    for (int i = 0; i < MESH_QOS_MAX_PENDING; ++i)
+    {
+        if (!g_qos_pending[i].used)
+            return &g_qos_pending[i];
     }
     return nullptr;
 }
 
-static mesh_qos_pending_t* qos_find_by_id(const char *id)
+static mesh_qos_pending_t *qos_find_by_id(const char *id)
 {
-    for (int i = 0; i < MESH_QOS_MAX_PENDING; ++i) {
-        if (g_qos_pending[i].used && !strcmp(g_qos_pending[i].id, id)) {
+    for (int i = 0; i < MESH_QOS_MAX_PENDING; ++i)
+    {
+        if (g_qos_pending[i].used && !strcmp(g_qos_pending[i].id, id))
+        {
             return &g_qos_pending[i];
         }
     }
@@ -523,13 +614,15 @@ void mesh_proto_qos_init(mesh_proto_send_cb_t send_cb)
 bool mesh_proto_qos_register_and_send(const char *id,
                                       const char *json)
 {
-    if (!g_qos_send_cb || !id || !json) {
+    if (!g_qos_send_cb || !id || !json)
+    {
         // sem callback ou parâmetros inválidos → não registra
         return false;
     }
 
     mesh_qos_pending_t *slot = qos_find_free_slot();
-    if (!slot) {
+    if (!slot)
+    {
         // sem slot, manda mesmo assim, mas sem tracking
         g_qos_send_cb(json);
         return false;
@@ -539,7 +632,7 @@ bool mesh_proto_qos_register_and_send(const char *id,
     slot->used = true;
     safe_copy(slot->id, sizeof(slot->id), id);
     safe_copy(slot->json, sizeof(slot->json), json);
-    slot->retries      = 0;
+    slot->retries = 0;
     slot->last_send_ms = millis();
 
     g_qos_send_cb(slot->json);
@@ -548,11 +641,14 @@ bool mesh_proto_qos_register_and_send(const char *id,
 
 void mesh_proto_qos_on_ack(const mesh_msg_t *msg)
 {
-    if (!msg || msg->type != MESH_MSG_ACK) return;
-    if (!msg->ack.has_ref) return;
+    if (!msg || msg->type != MESH_MSG_ACK)
+        return;
+    if (!msg->ack.has_ref)
+        return;
 
     mesh_qos_pending_t *slot = qos_find_by_id(msg->ack.ref);
-    if (!slot) {
+    if (!slot)
+    {
         // ACK de id desconhecido → ignora
         return;
     }
@@ -561,19 +657,26 @@ void mesh_proto_qos_on_ack(const mesh_msg_t *msg)
 
 void mesh_proto_qos_poll(void)
 {
-    if (!g_qos_send_cb) return;
+    if (!g_qos_send_cb)
+        return;
 
     uint32_t now = millis();
-    for (int i = 0; i < MESH_QOS_MAX_PENDING; ++i) {
+    for (int i = 0; i < MESH_QOS_MAX_PENDING; ++i)
+    {
         mesh_qos_pending_t &p = g_qos_pending[i];
-        if (!p.used) continue;
+        if (!p.used)
+            continue;
 
-        if ((now - p.last_send_ms) >= MESH_QOS_TIMEOUT_MS) {
-            if (p.retries < MESH_QOS_MAX_RETRIES) {
+        if ((now - p.last_send_ms) >= MESH_QOS_TIMEOUT_MS)
+        {
+            if (p.retries < MESH_QOS_MAX_RETRIES)
+            {
                 p.retries++;
                 p.last_send_ms = now;
                 g_qos_send_cb(p.json);
-            } else {
+            }
+            else
+            {
                 // falha definitiva, descarta
                 p.used = false;
             }
@@ -583,8 +686,10 @@ void mesh_proto_qos_poll(void)
 
 void mesh_proto_qos_send_ack_ok(const mesh_msg_t *req_msg)
 {
-    if (!g_qos_send_cb || !req_msg) return;
-    if (req_msg->qos != 1) return;  // só QoS1 ganha ACK automático
+    if (!g_qos_send_cb || !req_msg)
+        return;
+    if (req_msg->qos != 1)
+        return; // só QoS1 ganha ACK automático
 
     char id[8];
     char json[256];
@@ -602,7 +707,8 @@ void mesh_proto_qos_send_ack_ok(const mesh_msg_t *req_msg)
                               req_msg->id,
                               "ok",
                               json,
-                              sizeof(json))) {
+                              sizeof(json)))
+    {
         return;
     }
 
