@@ -21,7 +21,9 @@ static bool g_sd_ok = false;
 static int g_cur_ymd = -1;
 static uint32_t g_lines_since_flush = 0;
 
-/****************************** Funções privadas ******************************/
+/* ============================================================
+ * FUNÇÕES PRIVADAS
+ * ============================================================ */
 
 /**
  * @brief Verifica se uma @c struct tm representa a data 1970-01-01 (época zero).
@@ -245,11 +247,10 @@ static void ensure_file_for_today()
     }
 }
 
-/****************************** Funções públicas ******************************/
+/* ============================================================
+ * FUNÇÕES PÚBLICAS
+ * ============================================================ */
 
-/**
- * @brief Inicializa a interface com o cartão SD e abre o primeiro arquivo de log.
- */
 void sdcard_begin()
 {
     g_cs = SD_SPI_CS;
@@ -259,9 +260,6 @@ void sdcard_begin()
     g_sd_ok = open_new_file_for_now();
 }
 
-/**
- * @brief Rotina periódica para avaliar rotação diária do arquivo de log.
- */
 void sdcard_tick_rotate()
 {
     if (!g_sd_ok)
@@ -272,11 +270,6 @@ void sdcard_tick_rotate()
     ensure_file_for_today();
 }
 
-/**
- * @brief Versão @c vprintf para escrever linhas formatadas no arquivo de log.
- * @param fmt String de formato no estilo @c printf().
- * @param ap Lista de argumentos variável (va_list) correspondente a @p fmt.
- */
 void sdcard_vprintf(const char *fmt, va_list ap)
 {
     if (!g_sd_ok || !g_file)
@@ -306,11 +299,6 @@ void sdcard_vprintf(const char *fmt, va_list ap)
     }
 }
 
-/**
- * @brief Escreve no arquivo de log usando formato @c printf() com argumentos variáveis.
- * @param fmt String de formato no estilo @c printf().
- * @param ... Argumentos variáveis para @p fmt.
- */
 void sdcard_printf(const char *fmt, ...)
 {
     if (!g_sd_ok || !g_file)
@@ -324,9 +312,6 @@ void sdcard_printf(const char *fmt, ...)
     va_end(ap);
 }
 
-/**
- * @brief Força a gravação (flush) do arquivo de log atual.
- */
 void sdcard_flush()
 {
     if (!g_sd_ok || !g_file)
@@ -337,9 +322,6 @@ void sdcard_flush()
     g_file.flush();
 }
 
-/**
- * @brief Encerra o subsistema de SD, fechando o arquivo atual e desabilitando o uso.
- */
 void sdcard_end()
 {
     close_file();

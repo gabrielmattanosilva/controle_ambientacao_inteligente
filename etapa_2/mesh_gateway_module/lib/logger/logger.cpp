@@ -12,7 +12,9 @@
 static bool g_log_ready = false;
 static char s_line[256];
 
-/****************************** Funções privadas ******************************/
+/* ============================================================
+ * FUNÇÕES PRIVADAS
+ * ============================================================ */
 
 /**
  * @brief Formata o timestamp atual em horário local com milissegundos.
@@ -30,11 +32,10 @@ static void format_timestamp(char *out, size_t outlen)
              tm_local.tm_hour, tm_local.tm_min, tm_local.tm_sec, ms);
 }
 
-/****************************** Funções públicas ******************************/
+/* ============================================================
+ * FUNÇÕES PÚBLICAS
+ * ============================================================ */
 
-/**
- * @brief Inicializa o RTC interno em @c epoch 0 (1970-01-01 00:00:00 UTC).
- */
 void logger_init_epoch0()
 {
     struct timeval tv;
@@ -43,9 +44,6 @@ void logger_init_epoch0()
     settimeofday(&tv, nullptr);
 }
 
-/**
- * @brief Inicializa o logger, garantindo a Serial e registrando mensagem "pronto".
- */
 void logger_begin()
 {
     if (!Serial)
@@ -69,12 +67,6 @@ void logger_begin()
     sdcard_printf("%s [LOGGER] pronto\n", ts);
 }
 
-/**
- * @brief Imprime uma mensagem de log formatada com timestamp e @p tag.
- * @param tag Rótulo do subsistema/área (ex.: "MAIN", "LORA"); se @c nullptr, usa "LOG".
- * @param fmt String de formato no estilo @c printf().
- * @param ... Argumentos variáveis correspondentes a @p fmt.
- */
 void logger_log(const char *tag, const char *fmt, ...)
 {
     if (!g_log_ready)
@@ -100,50 +92,4 @@ void logger_log(const char *tag, const char *fmt, ...)
     }
 
     sdcard_printf("%s [%s] %s\n", ts, t, s_line);
-}
-
-/**
- * @brief Gera um hexdump do buffer indicado, com timestamp e @p tag.
- * @param tag Rótulo do subsistema/área (opcional); se @c nullptr, usa "LOG".
- * @param buf Ponteiro para o buffer de dados a ser despejado em hexadecimal.
- * @param len Tamanho, em bytes, do buffer @p buf.
- */
-void logger_hexdump(const char *tag, const uint8_t *buf, size_t len)
-{
-    if (!buf || len == 0)
-    {
-        logger_log(tag, "(hexdump vazio)");
-        return;
-    }
-
-    char ts[40];
-    format_timestamp(ts, sizeof(ts));
-    const char *t = tag ? tag : "LOG";
-
-    if (Serial)
-    {
-        Serial.printf("%s [%s] HEXDUMP (%u bytes):\n", ts, t, (unsigned)len);
-    }
-
-    sdcard_printf("%s [%s] HEXDUMP (%u bytes):\n", ts, t, (unsigned)len);
-
-    for (size_t off = 0; off < len; off += 16)
-    {
-        uint32_t pos = 0;
-        char line[3 * 16 + 1];
-
-        for (size_t i = 0; i < 16 && (off + i) < len; ++i)
-        {
-            pos += snprintf(line + pos, sizeof(line) - (size_t)pos, "%02X ", buf[off + i]);
-        }
-
-        line[(pos < (uint32_t)sizeof(line)) ? pos : (uint32_t)sizeof(line) - 1] = '\0';
-
-        if (Serial)
-        {
-            Serial.printf("%s [%s] %s\n", ts, t, line);
-        }
-
-        sdcard_printf("%s [%s] %s\n", ts, t, line);
-    }
 }

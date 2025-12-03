@@ -1,12 +1,28 @@
 #include "mesh_proto.h"
-#include <ArduinoJson.h>
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <string.h>
 
+/**
+ * @file mesh_proto.cpp
+ * @brief Implementação do parser, builders e gerenciador de QoS do protocolo mesh.
+ *
+ * Este arquivo contém:
+ * - Funções auxiliares internas de conversão/cópia;
+ * - Implementação de @ref mesh_proto_parse() e dos builders JSON;
+ * - Implementação do gerenciador de QoS (registro, retries, ACK automático).
+ */
+
 /* ============================================================
- * Helpers internos
+ * HELPERS INTERNOS
  * ============================================================ */
 
+/**
+ * @brief Converte uma string de tipo JSON no enum @ref mesh_msg_type_t.
+ *
+ * @param t String do campo "type" no JSON (ex.: "tele", "cfg", "hb").
+ * @return Tipo de mensagem correspondente ou MESH_MSG_UNKNOWN se não reconhecido.
+ */
 static mesh_msg_type_t type_from_str(const char *t)
 {
     if (!t || !t[0])
@@ -48,6 +64,16 @@ static mesh_msg_type_t type_from_str(const char *t)
     return MESH_MSG_UNKNOWN;
 }
 
+/**
+ * @brief Cópia segura de string com garantia de terminação em '\0'.
+ *
+ * Copia até @p dst_size - 1 caracteres de @p src para @p dst e garante que
+ * @p dst seja sempre terminada em '\0'. Se @p src for nulo, produz string vazia.
+ *
+ * @param dst      Buffer de destino.
+ * @param dst_size Tamanho total do buffer de destino.
+ * @param src      String de origem (pode ser nula).
+ */
 static void safe_copy(char *dst, size_t dst_size, const char *src)
 {
     if (!dst || dst_size == 0)
@@ -102,7 +128,7 @@ bool mesh_proto_parse(const char *json_str, mesh_msg_t *out_msg)
     JsonObject data = doc["data"].as<JsonObject>();
     if (!data)
     {
-        return true; // header ok, sem data
+        return true; /* Header ok, sem data */
     }
 
     /* TELE */
@@ -328,6 +354,15 @@ bool mesh_proto_parse(const char *json_str, mesh_msg_t *out_msg)
  * BUILDERS
  * ============================================================ */
 
+/**
+ * @brief Serializa um JsonDocument em string JSON, com checagem de tamanho.
+ *
+ * @param doc      Documento JSON a ser serializado.
+ * @param out_json Buffer de saída.
+ * @param maxlen   Tamanho máximo do buffer @p out_json.
+ *
+ * @return true se a serialização coube no buffer; false em caso de erro.
+ */
 static bool serialize_doc(JsonDocument &doc,
                           char *out_json, size_t maxlen)
 {
@@ -462,7 +497,7 @@ bool mesh_proto_build_ack(const char *id,
     JsonDocument doc;
     doc["id"] = id ? id : "";
     doc["ts"] = ts;
-    doc["qos"] = 0; // ACK normalmente QoS 0
+    doc["qos"] = 0;
     doc["src"] = src ? src : "";
     doc["dst"] = dst ? dst : "";
     doc["type"] = "ack";
@@ -554,44 +589,79 @@ bool mesh_proto_build_time(const char *id,
 }
 
 /* ============================================================
- * QoS MANAGER (dentro da lib)
+ * QoS MANAGER
  * ============================================================ */
 
-#define MESH_QOS_TIMEOUT_MS 1000UL
-#define MESH_QOS_MAX_RETRIES 3
-#define MESH_QOS_MAX_PENDING 4
+#define MESH_QOS_TIMEOUT_MS 1000UL /**< Timeout entre retries, em milissegundos. */
+#define MESH_QOS_MAX_RETRIES 3     /**< Número máximo de tentativas de reenvio. */
+#define MESH_QOS_MAX_PENDING 4     /**< Máximo de mensagens QoS pendentes. */
 
+/**
+ * @brief Estrutura interna de controle de mensagens QoS pendentes.
+ */
 typedef struct
 {
-    bool used;
-    char id[8];
-    char json[256];
-    uint8_t retries;
-    uint32_t last_send_ms;
+    bool used;             /**< true se o slot está em uso. */
+    char id[8];            /**< ID da mensagem (campo "id"). */
+    char json[256];        /**< Buffer com o JSON completo a ser reenviado. */
+    uint8_t retries;       /**< Número de retries já realizados. */
+    uint32_t last_send_ms; /**< Timestamp (millis) do último envio. */
 } mesh_qos_pending_t;
 
+/**
+ * @brief Lista estática de pendências QoS.
+ * */
 static mesh_qos_pending_t g_qos_pending[MESH_QOS_MAX_PENDING];
+
+/**
+ * @brief Callback de envio físico utilizado pelo gerenciador de QoS.
+ * */
 static mesh_proto_send_cb_t g_qos_send_cb = nullptr;
+
+/**
+ * @brief Contador interno para geração de IDs de ACK.
+ * */
 static uint16_t g_qos_id_counter = 0;
 
+/**
+ * @brief Gera um ID textual incremental em formato hexadecimal de 4 dígitos.
+ *
+ * @param buf Buffer de destino para o ID.
+ * @param len Tamanho do buffer de destino.
+ */
 static void qos_gen_id(char *buf, size_t len)
 {
     g_qos_id_counter++;
     if (!g_qos_id_counter)
+    {
         g_qos_id_counter = 1;
+    }
     snprintf(buf, len, "%04X", g_qos_id_counter);
 }
 
+/**
+ * @brief Procura um slot livre na lista de pendências QoS.
+ *
+ * @return Ponteiro para slot livre ou nullptr se não houver.
+ */
 static mesh_qos_pending_t *qos_find_free_slot()
 {
     for (int i = 0; i < MESH_QOS_MAX_PENDING; ++i)
     {
         if (!g_qos_pending[i].used)
+        {
             return &g_qos_pending[i];
+        }
     }
     return nullptr;
 }
 
+/**
+ * @brief Procura uma pendência QoS pelo seu ID de mensagem.
+ *
+ * @param id ID da mensagem (campo "id" do JSON).
+ * @return Ponteiro para a pendência encontrada ou nullptr se não houver.
+ */
 static mesh_qos_pending_t *qos_find_by_id(const char *id)
 {
     for (int i = 0; i < MESH_QOS_MAX_PENDING; ++i)
@@ -616,14 +686,14 @@ bool mesh_proto_qos_register_and_send(const char *id,
 {
     if (!g_qos_send_cb || !id || !json)
     {
-        // sem callback ou parâmetros inválidos → não registra
+        /* Sem callback ou parâmetros inválidos → não registra */
         return false;
     }
 
     mesh_qos_pending_t *slot = qos_find_free_slot();
     if (!slot)
     {
-        // sem slot, manda mesmo assim, mas sem tracking
+        /* Sem slot, manda mesmo assim, mas sem tracking */
         g_qos_send_cb(json);
         return false;
     }
@@ -642,14 +712,18 @@ bool mesh_proto_qos_register_and_send(const char *id,
 void mesh_proto_qos_on_ack(const mesh_msg_t *msg)
 {
     if (!msg || msg->type != MESH_MSG_ACK)
+    {
         return;
+    }
     if (!msg->ack.has_ref)
+    {
         return;
+    }
 
     mesh_qos_pending_t *slot = qos_find_by_id(msg->ack.ref);
     if (!slot)
     {
-        // ACK de id desconhecido → ignora
+        /* ACK de id desconhecido → ignora */
         return;
     }
     slot->used = false;
@@ -665,8 +739,9 @@ void mesh_proto_qos_poll(void)
     {
         mesh_qos_pending_t &p = g_qos_pending[i];
         if (!p.used)
+        {
             continue;
-
+        }
         if ((now - p.last_send_ms) >= MESH_QOS_TIMEOUT_MS)
         {
             if (p.retries < MESH_QOS_MAX_RETRIES)
@@ -677,7 +752,7 @@ void mesh_proto_qos_poll(void)
             }
             else
             {
-                // falha definitiva, descarta
+                /* Falha definitiva, descarta */
                 p.used = false;
             }
         }
@@ -687,16 +762,20 @@ void mesh_proto_qos_poll(void)
 void mesh_proto_qos_send_ack_ok(const mesh_msg_t *req_msg)
 {
     if (!g_qos_send_cb || !req_msg)
+    {
         return;
+    }
     if (req_msg->qos != 1)
-        return; // só QoS1 ganha ACK automático
+    {
+        return;
+    } /* Só QoS1 ganha ACK automático */
 
     char id[8];
     char json[256];
 
     qos_gen_id(id, sizeof(id));
 
-    // troca src/dst
+    /* Troca src/dst */
     const char *src = req_msg->dst;
     const char *dst = req_msg->src;
 

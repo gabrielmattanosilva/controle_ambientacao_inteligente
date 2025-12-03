@@ -16,7 +16,9 @@ static RTC_DS1307 g_rtc;
 static bool g_wire_started = false;
 static bool g_rtc_ready = false;
 
-/****************************** Funções privadas ******************************/
+/* ============================================================
+ * FUNÇÕES PRIVADAS
+ * ============================================================ */
 
 /**
  * @brief Valida se a data/hora lida é "razoável" (ano entre 2000 e 2099).
@@ -64,14 +66,10 @@ bool ds1307_rtc_begin(void)
     return true;
 }
 
-/****************************** Funções públicas ******************************/
+/* ============================================================
+ * FUNÇÕES PÚBLICAS
+ * ============================================================ */
 
-/**
- * @brief Sincroniza o RTC interno do ESP32 a partir do DS1307 durante o boot.
- * @return true se a sincronização ocorreu com sucesso, false se o dispositivo
- *         não estiver pronto, o relógio estiver parado, a data/hora for inválida
- *         ou @c settimeofday() falhar.
- */
 bool ds1307_rtc_sync_at_boot(void)
 {
     if (!g_rtc_ready && !ds1307_rtc_begin())
