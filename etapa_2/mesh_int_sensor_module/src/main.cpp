@@ -1,14 +1,16 @@
 /**
  * @file main.cpp
- * @brief Nó simulador int-sen-00 / ext-sen-00 / act-00
+ * @brief Nó simulador int-sen-00 / ext-sen-00
  *
- * Este firmware roda em um ESP32 separado e simula 3 nós lógicos:
+ * Este firmware roda em um ESP32 e simula 2 nós lógicos de SENSORES:
  *   - "int-sen-00"  → sensores internos (t_in, rh_in, soil_moist, lux_in)
  *   - "ext-sen-00"  → sensores externos (t_out, rh_out, lux_out)
- *   - "act-00"      → atuadores (intake_pwm, exhaust_pwm, humidifier, led_brig/led_rgb, irrigation)
  *
  * Toda comunicação é feita via rede mesh (painlessMesh + mesh_proto),
  * conversando com o mesh_gateway_module, que faz a ponte até o Blynk.
+ *
+ * Os atuadores ("act-00") são de responsabilidade do nó físico separado
+ * (esp32c3_node), que também utiliza a lib mesh_proto.
  */
 
 #include <Arduino.h>
@@ -27,25 +29,11 @@
 #define NODE_BLYNK_GW   "blynk-gw"
 #define NODE_MSH_GW     "msh-gw"
 
-// neste simulador, todos os dados vão para o blynk-gw
-#define NODE_SINK       NODE_BLYNK_GW
-
 // -----------------------------------------------------------------------------
 // Objetos da mesh
 // -----------------------------------------------------------------------------
 Scheduler       userScheduler;
 static painlessMesh mesh;
-
-// -----------------------------------------------------------------------------
-// Estado simulado dos atuadores (act-00)
-// -----------------------------------------------------------------------------
-static int  g_mode        = 0;        // 0=AUTO, 1=MANUAL (igual ao V13 do mock Python)
-static int  g_intake_pwm  = 0;
-static int  g_exhaust_pwm = 0;
-static int  g_humidifier  = 0;
-static int  g_irrigation  = 0;
-static int  g_led_pwm     = 0;        // usado como "led_brig"
-static char g_led_rgb[16] = "0x000000";
 
 // -----------------------------------------------------------------------------
 // Estado simulado dos sensores (interno/externo)
@@ -65,10 +53,6 @@ static int   g_lux_out    = 20000;
 static uint16_t      g_msg_counter   = 0;
 static unsigned long g_last_tele     = 0;
 static unsigned long g_last_hb_all   = 0;
-// STATE agora só é enviado em:
-//  - primeira conexão mesh
-//  - após aplicar CFG
-// então não precisamos de g_last_state
 
 static bool          g_hello_sent    = false;
 
@@ -110,7 +94,7 @@ static void mesh_send_json_cb(const char *json)
 }
 
 // -----------------------------------------------------------------------------
-// Simulação de ambiente (apenas SENSORES, sem mexer em atuadores)
+// Simulação de ambiente (apenas SENSORES)
 // -----------------------------------------------------------------------------
 
 static void simulate_sensors_step()
@@ -138,7 +122,7 @@ static void simulate_sensors_step()
 }
 
 // -----------------------------------------------------------------------------
-// Envio de TELE / STATE / HB / HELLO
+// Envio de TELE / HB / HELLO
 // -----------------------------------------------------------------------------
 
 /**
@@ -164,7 +148,7 @@ static void send_tele_dump()
     doc["ts"]   = (uint32_t)millis();
     doc["qos"]  = 0;
     doc["src"]  = NODE_EXT;
-    doc["dst"]  = NODE_SINK;
+    doc["dst"]  = NODE_BLYNK_GW;
     doc["type"] = "tele";
 
     data = doc["data"].to<JsonObject>();
@@ -182,7 +166,7 @@ static void send_tele_dump()
     doc["ts"]   = (uint32_t)millis();
     doc["qos"]  = 0;
     doc["src"]  = NODE_INT;
-    doc["dst"]  = NODE_SINK;
+    doc["dst"]  = NODE_BLYNK_GW;
     doc["type"] = "tele";
 
     data = doc["data"].to<JsonObject>();
@@ -192,38 +176,6 @@ static void send_tele_dump()
     data["lux_in"]     = g_lux_in;
 
     serializeJson(doc, json, sizeof(json));
-    mesh_send_json_cb(json);
-}
-
-/**
- * Envia STATE atual dos atuadores (act-00).
- * Usado:
- *   - logo após primeira conexão mesh
- *   - sempre que um CFG de atuador for aplicado.
- */
-static void send_state_now()
-{
-    char id[8];
-    char json[256];
-
-    gen_msg_id(id, sizeof(id));
-
-    if (!mesh_proto_build_state_act(id,
-                                    (uint32_t)millis(),
-                                    0,              // QoS0
-                                    NODE_ACT,
-                                    NODE_SINK,
-                                    g_intake_pwm,
-                                    g_exhaust_pwm,
-                                    g_humidifier,
-                                    g_led_pwm,
-                                    g_led_rgb,
-                                    g_irrigation,
-                                    json,
-                                    sizeof(json))) {
-        return;
-    }
-
     mesh_send_json_cb(json);
 }
 
@@ -240,7 +192,7 @@ static void send_hb_for(const char *node_id, int rssi_dbm)
     if (!mesh_proto_build_hb(id,
                              (uint32_t)millis(),
                              node_id,
-                             NODE_SINK,
+                             NODE_BLYNK_GW,
                              (int)(millis() / 1000),
                              rssi_dbm,
                              json,
@@ -252,17 +204,15 @@ static void send_hb_for(const char *node_id, int rssi_dbm)
 }
 
 /**
- * Envia heartbeat de TODOS os nós simulados:
+ * Envia heartbeat de TODOS os nós de sensores simulados:
  *   - int-sen-00
  *   - ext-sen-00
- *   - act-00
  */
 static void send_hb_all()
 {
     int base_rssi = -60;
     send_hb_for(NODE_INT, base_rssi + random(-3, 4));
     send_hb_for(NODE_EXT, base_rssi + random(-3, 4));
-    send_hb_for(NODE_ACT, base_rssi + random(-3, 4));
 }
 
 /**
@@ -301,74 +251,13 @@ static void send_hello_for(const char *node_id,
 }
 
 /**
- * Envia HELLO de todos os nós simulados.
+ * Envia HELLO de todos os nós de sensores simulados.
  * Chamado uma vez após a mesh estar conectada.
  */
 static void send_hello_all()
 {
     send_hello_for(NODE_INT, "1.0.0-sim", "internal sensors");
     send_hello_for(NODE_EXT, "1.0.0-sim", "external sensors");
-    send_hello_for(NODE_ACT, "1.0.0-sim", "actuators");
-}
-
-// -----------------------------------------------------------------------------
-// Aplicar CFG recebido (comportamento de "act-00")
-// -----------------------------------------------------------------------------
-
-/**
- * Aplica CFG recebido do Blynk (via mesh_gateway):
- *
- * - g_mode (AUTO/MANUAL) segue exatamente a lógica do mock Python:
- *   * mode = 0 (AUTO): comandos de atuadores são ignorados.
- *   * mode = 1 (MANUAL): comandos de atuadores são aplicados.
- *
- * - Após aplicar (ou ignorar) os comandos, envia STATE imediato
- *   e responde ACK "ok" se o CFG for QoS1.
- */
-static void apply_cfg(const mesh_msg_t &msg)
-{
-    // 1) Atualiza modo primeiro, se vier no CFG
-    if (msg.cfg.has_mode) {
-        g_mode = msg.cfg.mode;
-    }
-
-    // 2) Só aplica comandos de atuador se estivermos em modo MANUAL (1)
-    if (g_mode == 1) {
-        if (msg.cfg.has_intake_pwm)
-            g_intake_pwm = msg.cfg.intake_pwm;
-
-        if (msg.cfg.has_exhaust_pwm)
-            g_exhaust_pwm = msg.cfg.exhaust_pwm;
-
-        if (msg.cfg.has_humidifier)
-            g_humidifier = msg.cfg.humidifier;
-
-        if (msg.cfg.has_irrigation)
-            g_irrigation = msg.cfg.irrigation;
-
-        if (msg.cfg.has_led_pwm)
-            g_led_pwm = msg.cfg.led_pwm;
-
-        if (msg.cfg.has_led_rgb)
-            strncpy(g_led_rgb, msg.cfg.led_rgb, sizeof(g_led_rgb) - 1);
-    } else {
-        // Em AUTO ignoramos comandos de atuador (equivalente ao mock Python)
-        if (msg.cfg.has_intake_pwm || msg.cfg.has_exhaust_pwm ||
-            msg.cfg.has_humidifier || msg.cfg.has_irrigation ||
-            msg.cfg.has_led_pwm   || msg.cfg.has_led_rgb) {
-            Serial.printf("[CFG] modo=%d (AUTO), ignorando comandos de atuadores\n", g_mode);
-        }
-    }
-
-    Serial.printf("[CFG] mode=%d, intake=%d, exhaust=%d, hum=%d, irr=%d, led_pwm=%d, led_rgb=%s\n",
-                  g_mode, g_intake_pwm, g_exhaust_pwm,
-                  g_humidifier, g_irrigation, g_led_pwm, g_led_rgb);
-
-    // 3) Envia STATE imediato refletindo o estado atual
-    send_state_now();
-
-    // 4) Se o CFG era QoS1, envia ACK "ok" via lib (vai pela mesh)
-    mesh_proto_qos_send_ack_ok(&msg);
 }
 
 // -----------------------------------------------------------------------------
@@ -393,26 +282,37 @@ static void handle_mesh_json(const char *json)
     }
 
     // 2) Demais tipos: aplica filtro de destino lógico
+    //    Este nó só se interessa por mensagens endereçadas a:
+    //    - msh-gw (NODE_MSH_GW) [ex: TIME]
+    //    - int-sen-00
+    //    - ext-sen-00
+    //    - broadcast "*" (se no futuro quisermos algo)
     if (strcmp(msg.dst, NODE_MSH_GW) != 0 &&
-        strcmp(msg.dst, NODE_ACT)    != 0 &&
         strcmp(msg.dst, NODE_INT)    != 0 &&
         strcmp(msg.dst, NODE_EXT)    != 0 &&
         strcmp(msg.dst, "*")         != 0) {
-        Serial.printf("[RX] ignorado dst=%s\n", msg.dst);
+        // Mensagem não é para este nó, ignora silenciosamente
         return;
     }
 
     switch (msg.type) {
     case MESH_MSG_CFG:
-        apply_cfg(msg);
+        // Este módulo não é responsável por CFG de atuadores (act-00).
+        // Se futuramente houver CFG específico para sensores, tratar aqui.
+        Serial.printf("[RX CFG] ignorado para dst=%s (somente sensores simulados aqui)\n",
+                      msg.dst);
         break;
 
     case MESH_MSG_TIME:
         Serial.println("[TIME] recebido (simulado, não aplicado)");
+        // Enviar ACK se QoS=1
+        if (msg.qos == 1) {
+            mesh_proto_qos_send_ack_ok(&msg);
+        }
         break;
 
     default:
-        Serial.printf("[RX] tipo não tratado=%d\n", msg.type);
+        Serial.printf("[RX] tipo não tratado=%d dst=%s\n", msg.type, msg.dst);
         break;
     }
 }
@@ -434,11 +334,8 @@ void mesh_new_connection_cb(uint32_t nodeId)
     // Só envia HELLO uma vez, na primeira conexão com a rede mesh
     if (!g_hello_sent) {
         g_hello_sent = true;
-        Serial.println("[MESH] Primeira conexao estabelecida, enviando HELLO QoS1 de todos os nos simulados...");
+        Serial.println("[MESH] Primeira conexao estabelecida, enviando HELLO QoS1 de todos os nos de sensores simulados...");
         send_hello_all();
-
-        // STATE inicial com todos atuadores em 0
-        send_state_now();
     }
 }
 
@@ -460,7 +357,9 @@ void setup()
 {
     Serial.begin(115200);
     delay(500);
-    Serial.println("[int-sen-00-sim] boot");
+    Serial.println("========================================");
+    Serial.println("[int-sen-00/ext-sen-00] Sensor Node Boot");
+    Serial.println("========================================");
 
     randomSeed(esp_random());
 
@@ -472,7 +371,7 @@ void setup()
     mesh.onChangedConnections(&mesh_changed_connections_cb);
     mesh.onNodeTimeAdjusted(&mesh_time_adjusted_cb);
 
-    // Inicializa QoS da lib (usado para HELLO QoS1, ACK de CFG, etc.)
+    // Inicializa QoS da lib (usado para HELLO QoS1, ACK, etc.)
     mesh_proto_qos_init(mesh_send_json_cb);
 
     // Estado inicial do ambiente (aleatoriza um pouco)
@@ -489,9 +388,9 @@ void setup()
     g_lux_in     = clampi(g_lux_in, 0, 40000);
     g_lux_out    = clampi(g_lux_out, 0, 60000);
 
-    // Atuadores já estão inicializados em 0 (estado default do mock Python)
-
-    Serial.println("[int-sen-00-sim] mesh inicializada");
+    Serial.println("[SENSOR NODE] Mesh inicializada");
+    Serial.printf("[SENSOR NODE] Simulando: %s e %s\n", NODE_INT, NODE_EXT);
+    Serial.println("========================================");
 }
 
 void loop()
@@ -506,7 +405,7 @@ void loop()
         send_tele_dump();
     }
 
-    // Heartbeat de todos os nós simulados a cada 10 s
+    // Heartbeat de todos os nós de sensores simulados a cada 10 s
     if (now - g_last_hb_all >= 10000UL) { // 10 s
         g_last_hb_all = now;
         send_hb_all();

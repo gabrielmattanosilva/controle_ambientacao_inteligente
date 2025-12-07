@@ -18,6 +18,9 @@
 static const char *TAG = "MESH_GW";
 
 // Identificadores lógicos de nós
+#define NODE_INT        "int-sen-00"
+#define NODE_EXT        "ext-sen-00"
+#define NODE_ACT        "act-00"
 #define NODE_BLYNK_GW   "blynk-gw"
 #define NODE_MSH_GW     "msh-gw"
 
@@ -168,6 +171,18 @@ static void send_time_to_blynk_gw()
     mesh_proto_qos_register_and_send(id, json);
 }
 
+static bool is_known_dst(const char *dst)
+{
+    return
+        strcmp(dst, NODE_MSH_GW)   == 0 ||
+        strcmp(dst, NODE_BLYNK_GW) == 0 ||
+        strcmp(dst, NODE_INT)      == 0 ||
+        strcmp(dst, NODE_EXT)      == 0 ||
+        strcmp(dst, NODE_ACT)      == 0 ||
+        strcmp(dst, "*")           == 0;
+}
+
+
 // -----------------------------------------------------------------------------
 // Handlers de mensagens
 // -----------------------------------------------------------------------------
@@ -175,9 +190,10 @@ static void send_time_to_blynk_gw()
 /**
  * @brief Trata mensagens recebidas da UART (vindas do blynk_gateway_module).
  *
- * - Faz o parse com mesh_proto_parse para poder filtrar por dst.
- * - Repassa para a mesh apenas o que estiver endereçado a NODE_MSH_GW ou "*".
- * - Trata ACK vindo do blynk_gateway para gerenciar QoS (HELLO/TIME).
+ * - Faz o parse com mesh_proto_parse para poder filtrar por dst e type.
+ * - Tratar ACK destinados ao NODE_MSH_GW (QoS de HELLO/TIME).
+ * - Repassa para a mesh qualquer mensagem válida cujo dst seja um nó conhecido
+ *   (NODE_INT, NODE_EXT, NODE_ACT, NODE_BLYNK_GW, NODE_MSH_GW ou "*").
  */
 static void handle_uart_json(const char *json)
 {
@@ -188,16 +204,9 @@ static void handle_uart_json(const char *json)
         return;
     }
 
-    // Só processa mensagens destinadas ao gateway mesh (ou broadcast)
-    if (strcmp(msg.dst, NODE_MSH_GW) != 0 &&
-        strcmp(msg.dst, "*") != 0)
-    {
-        LOG("UART", "RX ignorado dst=\"%s\"", msg.dst);
-        return;
-    }
-
-    // Mensagens ACK referem-se tipicamente a envios QoS1 (HELLO/TIME, etc.)
-    if (msg.type == MESH_MSG_ACK)
+    // Primeiro: se for ACK para o próprio mesh_gateway (msh-gw),
+    // tratamos QoS e NÃO encaminhamos para a mesh.
+    if (msg.type == MESH_MSG_ACK && strcmp(msg.dst, NODE_MSH_GW) == 0)
     {
         // Atualiza gerenciador de QoS interno (HELLO/TIME)
         mesh_proto_qos_on_ack(&msg);
@@ -209,12 +218,21 @@ static void handle_uart_json(const char *json)
             LOG("UART", "ACK do HELLO recebido, enviando TIME QoS1");
             send_time_to_blynk_gw();
         }
-        return; // ACK nao é encaminhado para a mesh
+        return; // ACK para msh-gw não vai para a mesh
     }
 
-    // Demais mensagens (CFG, EVT etc.) são repassadas para a mesh
+    // Se o dst não é um nó conhecido da nossa rede, ignoramos
+    if (!is_known_dst(msg.dst))
+    {
+        LOG("UART", "RX ignorado dst=\"%s\"", msg.dst);
+        return;
+    }
+
+    // Qualquer outra mensagem (CFG, EVT, TELE, STATE...) é apenas
+    // repassada "burra" para a mesh, respeitando o dst lógico que veio.
     forward_uart_to_mesh(json);
 }
+
 
 /**
  * @brief Trata mensagens recebidas da MESH.
