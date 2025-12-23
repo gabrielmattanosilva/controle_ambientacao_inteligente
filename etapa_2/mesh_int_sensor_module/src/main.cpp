@@ -1,33 +1,42 @@
 /**
  * @file main.cpp
- * @brief Nó simulador int-sen-00 / ext-sen-00
+ * @brief Nó int-sen-00 (sensores reais)
  *
- * Este firmware roda em um ESP32 e simula 2 nós lógicos de SENSORES:
- *   - "int-sen-00"  → sensores internos (t_in, rh_in, soil_moist, lux_in)
- *   - "ext-sen-00"  → sensores externos (t_out, rh_out, lux_out)
+ * Este firmware roda em um ESP32 e publica telemetria via mesh (painlessMesh + mesh_proto).
  *
- * Toda comunicação é feita via rede mesh (painlessMesh + mesh_proto),
- * conversando com o mesh_gateway_module, que faz a ponte até o Blynk.
+ * Lógica mantida:
+ *  - Envia TELE periódica (60s) para o blynk-gw
+ *  - Envia HB (10s) do int-sen-00
+ *  - Envia HELLO QoS1 uma vez ao conectar na mesh
+ *  - Faz mesh_proto_qos_poll() no loop (retries QoS1)
  *
- * Os atuadores ("act-00") são de responsabilidade do nó físico separado
- * (esp32c3_node), que também utiliza a lib mesh_proto.
+ * Sensores reais (mesmos pinos do seu main_teste.cpp):
+ *  - AHTX0 (temperatura/umidade) via I2C
+ *  - BH1750 (lux) via I2C
+ *  - Umidade do solo capacitiva (analógico) no GPIO34
  */
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <painlessMesh.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <Adafruit_AHTX0.h>
+#include <BH1750.h>
 
-#include "credentials.h"   // MESH_PREFIX, MESH_PASSWORD, MESH_PORT
+#include "credentials.h"
 #include "mesh_proto.h"
+#include "pins.h"
 
 // -----------------------------------------------------------------------------
 // Identificadores lógicos de nós
 // -----------------------------------------------------------------------------
 #define NODE_INT        "int-sen-00"
-#define NODE_EXT        "ext-sen-00"
-#define NODE_ACT        "act-00"
 #define NODE_BLYNK_GW   "blynk-gw"
 #define NODE_MSH_GW     "msh-gw"
+
+static const int SOIL_DRY_VALUE = 2521;
+static const int SOIL_WET_VALUE = 1200;
 
 // -----------------------------------------------------------------------------
 // Objetos da mesh
@@ -36,30 +45,33 @@ Scheduler       userScheduler;
 static painlessMesh mesh;
 
 // -----------------------------------------------------------------------------
-// Estado simulado dos sensores (interno/externo)
+// Sensores reais
 // -----------------------------------------------------------------------------
-static float g_t_in       = 25.0f;
-static float g_rh_in      = 60.0f;
-static int   g_soil_moist = 60;
-static int   g_lux_in     = 5000;
+static Adafruit_AHTX0 g_aht;
+static BH1750         g_bh1750;
 
-static float g_t_out      = 27.0f;
-static float g_rh_out     = 55.0f;
-static int   g_lux_out    = 20000;
+static bool g_aht_ok = false;
+static bool g_bh_ok  = false;
 
 // -----------------------------------------------------------------------------
-// Controle de envio / contadores
+// Últimos valores lidos
 // -----------------------------------------------------------------------------
-static uint16_t      g_msg_counter   = 0;
-static unsigned long g_last_tele     = 0;
-static unsigned long g_last_hb_all   = 0;
+static float g_t_in       = NAN;
+static float g_rh_in      = NAN;
+static int   g_soil_moist = -1;   // %
+static int   g_lux_in     = -1;   // lux
 
-static bool          g_hello_sent    = false;
+// -----------------------------------------------------------------------------
+// Controle de envio
+// -----------------------------------------------------------------------------
+static uint16_t      g_msg_counter = 0;
+static unsigned long g_last_tele   = 0;
+static unsigned long g_last_hb     = 0;
+static bool          g_hello_sent  = false;
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
-
 static void gen_msg_id(char *buf, size_t len)
 {
     g_msg_counter++;
@@ -81,56 +93,74 @@ static int clampi(int v, int vmin, int vmax)
     return v;
 }
 
+static int soil_raw_to_percent(int raw)
+{
+    // raw == SOIL_DRY_VALUE => 0%
+    // raw == SOIL_WET_VALUE => 100%
+    if (SOIL_DRY_VALUE == SOIL_WET_VALUE) {
+        return 0;
+    }
+
+    float pct = (float)(SOIL_DRY_VALUE - raw) * 100.0f /
+                (float)(SOIL_DRY_VALUE - SOIL_WET_VALUE);
+
+    int ipct = (int)lroundf(pct);
+    return clampi(ipct, 0, 100);
+}
+
 /**
- * Callback usado pela lib mesh_proto para enviar JSONs QoS1 (ACK, HELLO, TIME, EVT, etc.)
+ * Callback usado pela lib mesh_proto para enviar JSONs QoS1 (ACK, HELLO, TIME, etc.)
  * via rede mesh.
  */
 static void mesh_send_json_cb(const char *json)
 {
-    // Usamos broadcast; o campo "dst" no JSON define quem deve processar.
     mesh.sendBroadcast(json);
     Serial.print("[MESH TX] ");
     Serial.println(json);
 }
 
 // -----------------------------------------------------------------------------
-// Simulação de ambiente (apenas SENSORES)
+// Leitura dos sensores reais
 // -----------------------------------------------------------------------------
-
-static void simulate_sensors_step()
+static void read_sensors_step()
 {
-    // Ambiente externo
-    g_t_out   += (float)random(-5, 6) / 10.0f;   // ±0.5 °C
-    g_rh_out  += (float)random(-8, 9) / 10.0f;   // ±0.8 %
-    g_lux_out += random(-3000, 3001);            // ±3000 lux
+    // AHT (temp/umidade)
+    if (g_aht_ok) {
+        sensors_event_t hum, temp;
+        bool ok = g_aht.getEvent(&hum, &temp);
+        if (ok) {
+            g_t_in  = temp.temperature;
+            g_rh_in = hum.relative_humidity;
+        } else {
+            Serial.println("[SENS] AHT getEvent() falhou (mantendo últimos valores)");
+        }
+    }
 
-    g_t_out   = clampf(g_t_out,   18.0f, 36.0f);
-    g_rh_out  = clampf(g_rh_out,  30.0f, 90.0f);
-    g_lux_out = clampi(g_lux_out,     0, 60000);
+    // BH1750 (lux)
+    if (g_bh_ok) {
+        float lux = g_bh1750.readLightLevel();
+        if (!isnan(lux) && lux >= 0.0f) {
+            g_lux_in = (int)lroundf(lux);
+        } else {
+            Serial.println("[SENS] BH1750 readLightLevel() invalido (mantendo últimos valores)");
+        }
+    }
 
-    // Ambiente interno
-    g_t_in   += (float)random(-4, 5) / 10.0f;    // ±0.4 °C
-    g_rh_in  += (float)random(-7, 8) / 10.0f;    // ±0.7 %
-    g_t_in    = clampf(g_t_in,   20.0f, 34.0f);
-    g_rh_in   = clampf(g_rh_in,  35.0f, 95.0f);
+    // Umidade do solo (analógico)
+    int raw = analogRead(SOIL_MOISTURE_SENSOR);
+    g_soil_moist = soil_raw_to_percent(raw);
 
-    g_soil_moist += random(-3, 4);              // ±3 %
-    g_soil_moist  = clampi(g_soil_moist, 20, 100);
+    // Sanity clamp (opcional)
+    if (!isnan(g_t_in))  g_t_in  = clampf(g_t_in,  -10.0f,  80.0f);
+    if (!isnan(g_rh_in)) g_rh_in = clampf(g_rh_in,   0.0f, 100.0f);
 
-    g_lux_in += random(-2500, 2501);            // ±2500 lux
-    g_lux_in  = clampi(g_lux_in, 0, 40000);
+    if (g_lux_in >= 0)     g_lux_in = clampi(g_lux_in, 0, 200000);
+    if (g_soil_moist >= 0) g_soil_moist = clampi(g_soil_moist, 0, 100);
 }
 
 // -----------------------------------------------------------------------------
 // Envio de TELE / HB / HELLO
 // -----------------------------------------------------------------------------
-
-/**
- * Envia um "dump" de telemetria:
- *   - TELE de ext-sen-00
- *   - TELE de int-sen-00
- * Chamado a cada 60 s.
- */
 static void send_tele_dump()
 {
     JsonDocument doc;
@@ -138,28 +168,9 @@ static void send_tele_dump()
     char id[8];
     char json[256];
 
-    // Atualiza somente os SENSORES
-    simulate_sensors_step();
+    // Atualiza sensores reais
+    read_sensors_step();
 
-    // --- TELE externa (ext-sen-00) ---
-    gen_msg_id(id, sizeof(id));
-    doc.clear();
-    doc["id"]   = id;
-    doc["ts"]   = (uint32_t)millis();
-    doc["qos"]  = 0;
-    doc["src"]  = NODE_EXT;
-    doc["dst"]  = NODE_BLYNK_GW;
-    doc["type"] = "tele";
-
-    data = doc["data"].to<JsonObject>();
-    data["t_out"]   = g_t_out;
-    data["rh_out"]  = g_rh_out;
-    data["lux_out"] = g_lux_out;
-
-    serializeJson(doc, json, sizeof(json));
-    mesh_send_json_cb(json);
-
-    // --- TELE interna (int-sen-00) ---
     gen_msg_id(id, sizeof(id));
     doc.clear();
     doc["id"]   = id;
@@ -170,20 +181,20 @@ static void send_tele_dump()
     doc["type"] = "tele";
 
     data = doc["data"].to<JsonObject>();
-    data["t_in"]       = g_t_in;
-    data["rh_in"]      = g_rh_in;
-    data["soil_moist"] = g_soil_moist;
-    data["lux_in"]     = g_lux_in;
+    if (!isnan(g_t_in))       data["t_in"]       = g_t_in;
+    if (!isnan(g_rh_in))      data["rh_in"]      = g_rh_in;
+    if (g_soil_moist >= 0)    data["soil_moist"] = g_soil_moist;
+    if (g_lux_in >= 0)        data["lux_in"]     = g_lux_in;
 
     serializeJson(doc, json, sizeof(json));
     mesh_send_json_cb(json);
 }
 
-/**
- * Envia heartbeat de um nó lógico.
- */
-static void send_hb_for(const char *node_id, int rssi_dbm)
+static void send_hb()
 {
+    int rssi = WiFi.RSSI();
+    if (rssi == 0) rssi = -60;
+
     char id[8];
     char json[256];
 
@@ -191,10 +202,10 @@ static void send_hb_for(const char *node_id, int rssi_dbm)
 
     if (!mesh_proto_build_hb(id,
                              (uint32_t)millis(),
-                             node_id,
+                             NODE_INT,
                              NODE_BLYNK_GW,
                              (int)(millis() / 1000),
-                             rssi_dbm,
+                             rssi,
                              json,
                              sizeof(json))) {
         return;
@@ -203,27 +214,7 @@ static void send_hb_for(const char *node_id, int rssi_dbm)
     mesh_send_json_cb(json);
 }
 
-/**
- * Envia heartbeat de TODOS os nós de sensores simulados:
- *   - int-sen-00
- *   - ext-sen-00
- */
-static void send_hb_all()
-{
-    int base_rssi = -60;
-    send_hb_for(NODE_INT, base_rssi + random(-3, 4));
-    send_hb_for(NODE_EXT, base_rssi + random(-3, 4));
-}
-
-/**
- * Envia HELLO de um nó lógico (apresentação ao mesh_gateway).
- *   - qos=1
- *   - dst="msh-gw"
- *   - vai pelo gerenciador de QoS (mesh_proto_qos_register_and_send)
- */
-static void send_hello_for(const char *node_id,
-                           const char *fw_ver,
-                           const char *extra)
+static void send_hello()
 {
     char id[8];
     char json[256];
@@ -233,37 +224,25 @@ static void send_hello_for(const char *node_id,
     if (!mesh_proto_build_hello(id,
                                 (uint32_t)millis(),
                                 1,              // QoS1
-                                node_id,        // src lógico
-                                NODE_MSH_GW,    // dst = mesh-gw
-                                node_id,
-                                fw_ver,
-                                extra,
+                                NODE_INT,
+                                NODE_MSH_GW,
+                                NODE_INT,
+                                "1.0.0-real",
+                                "internal sensors (real)",
                                 json,
                                 sizeof(json))) {
         return;
     }
 
-    // QoS1 com retry automático
+    // Registra para retry; se falhar (ex: tabela cheia), envia sem retry
     if (!mesh_proto_qos_register_and_send(id, json)) {
-        // fallback se a fila de QoS estiver cheia
         mesh_send_json_cb(json);
     }
-}
-
-/**
- * Envia HELLO de todos os nós de sensores simulados.
- * Chamado uma vez após a mesh estar conectada.
- */
-static void send_hello_all()
-{
-    send_hello_for(NODE_INT, "1.0.0-sim", "internal sensors");
-    send_hello_for(NODE_EXT, "1.0.0-sim", "external sensors");
 }
 
 // -----------------------------------------------------------------------------
 // Handlers de mensagens da mesh
 // -----------------------------------------------------------------------------
-
 static void handle_mesh_json(const char *json)
 {
     mesh_msg_t msg;
@@ -273,7 +252,7 @@ static void handle_mesh_json(const char *json)
         return;
     }
 
-    // 1) ACK: SEMPRE avisar o gerenciador de QoS, independente do dst lógico
+    // ACK QoS1
     if (msg.type == MESH_MSG_ACK) {
         mesh_proto_qos_on_ack(&msg);
         Serial.printf("[RX ACK] ref=%s from=%s dst=%s\n",
@@ -281,31 +260,24 @@ static void handle_mesh_json(const char *json)
         return;
     }
 
-    // 2) Demais tipos: aplica filtro de destino lógico
-    //    Este nó só se interessa por mensagens endereçadas a:
-    //    - msh-gw (NODE_MSH_GW) [ex: TIME]
-    //    - int-sen-00
-    //    - ext-sen-00
-    //    - broadcast "*" (se no futuro quisermos algo)
+    // Aceita mensagens destinadas ao gateway mesh (msh-gw), a este nó, ou broadcast (*)
     if (strcmp(msg.dst, NODE_MSH_GW) != 0 &&
         strcmp(msg.dst, NODE_INT)    != 0 &&
-        strcmp(msg.dst, NODE_EXT)    != 0 &&
         strcmp(msg.dst, "*")         != 0) {
-        // Mensagem não é para este nó, ignora silenciosamente
         return;
     }
 
     switch (msg.type) {
-    case MESH_MSG_CFG:
-        // Este módulo não é responsável por CFG de atuadores (act-00).
-        // Se futuramente houver CFG específico para sensores, tratar aqui.
-        Serial.printf("[RX CFG] ignorado para dst=%s (somente sensores simulados aqui)\n",
-                      msg.dst);
+    case MESH_MSG_TIME:
+        // Se você quiser aplicar hora local aqui no futuro, faça aqui
+        Serial.println("[TIME] recebido (não aplicado neste nó)");
+        if (msg.qos == 1) {
+            mesh_proto_qos_send_ack_ok(&msg);
+        }
         break;
 
-    case MESH_MSG_TIME:
-        Serial.println("[TIME] recebido (simulado, não aplicado)");
-        // Enviar ACK se QoS=1
+    case MESH_MSG_CFG:
+        Serial.printf("[RX CFG] recebido dst=%s (não aplicado aqui)\n", msg.dst);
         if (msg.qos == 1) {
             mesh_proto_qos_send_ack_ok(&msg);
         }
@@ -313,6 +285,10 @@ static void handle_mesh_json(const char *json)
 
     default:
         Serial.printf("[RX] tipo não tratado=%d dst=%s\n", msg.type, msg.dst);
+        if (msg.qos == 1) {
+            // Se quiser ACK genérico para todos QoS1, habilite aqui.
+            // Por enquanto, só TIME/CFG acima.
+        }
         break;
     }
 }
@@ -320,7 +296,6 @@ static void handle_mesh_json(const char *json)
 // -----------------------------------------------------------------------------
 // Callbacks da painlessMesh
 // -----------------------------------------------------------------------------
-
 void mesh_receive_cb(uint32_t from, String &msg)
 {
     Serial.printf("[MESH RX] from %u: %s\n", from, msg.c_str());
@@ -331,11 +306,10 @@ void mesh_new_connection_cb(uint32_t nodeId)
 {
     Serial.printf("[MESH] New connection, nodeId=%u\n", nodeId);
 
-    // Só envia HELLO uma vez, na primeira conexão com a rede mesh
     if (!g_hello_sent) {
         g_hello_sent = true;
-        Serial.println("[MESH] Primeira conexao estabelecida, enviando HELLO QoS1 de todos os nos de sensores simulados...");
-        send_hello_all();
+        Serial.println("[MESH] Primeira conexao estabelecida, enviando HELLO QoS1...");
+        send_hello();
     }
 }
 
@@ -352,16 +326,29 @@ void mesh_time_adjusted_cb(int32_t offset)
 // -----------------------------------------------------------------------------
 // setup / loop
 // -----------------------------------------------------------------------------
-
 void setup()
 {
     Serial.begin(115200);
     delay(500);
+
     Serial.println("========================================");
-    Serial.println("[int-sen-00/ext-sen-00] Sensor Node Boot");
+    Serial.println("[int-sen-00] Sensor Node Boot (REAL)");
     Serial.println("========================================");
 
-    randomSeed(esp_random());
+    // I2C (mesmo do main_teste.cpp)
+    Wire.begin();
+
+    // Inicializa sensores reais
+    g_aht_ok = g_aht.begin();
+    if (g_aht_ok) Serial.println("[SENS] AHTX0 OK");
+    else          Serial.println("[SENS] AHTX0 FALHOU");
+
+    g_bh_ok = g_bh1750.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
+    if (g_bh_ok) Serial.println("[SENS] BH1750 OK");
+    else         Serial.println("[SENS] BH1750 FALHOU");
+
+    // ADC
+    pinMode(SOIL_MOISTURE_SENSOR, INPUT);
 
     // Inicializa rede mesh
     mesh.setDebugMsgTypes(ERROR | STARTUP);
@@ -371,25 +358,13 @@ void setup()
     mesh.onChangedConnections(&mesh_changed_connections_cb);
     mesh.onNodeTimeAdjusted(&mesh_time_adjusted_cb);
 
-    // Inicializa QoS da lib (usado para HELLO QoS1, ACK, etc.)
+    // QoS da lib (HELLO QoS1, ACK, etc.)
     mesh_proto_qos_init(mesh_send_json_cb);
 
-    // Estado inicial do ambiente (aleatoriza um pouco)
-    g_t_in       += (float)random(-10, 11) / 10.0f;
-    g_rh_in      += (float)random(-15, 16) / 10.0f;
-    g_soil_moist += random(-10, 11);
-    g_lux_in     += random(-3000, 3001);
+    // Primeira leitura no boot
+    read_sensors_step();
 
-    g_t_out      += (float)random(-10, 11) / 10.0f;
-    g_rh_out     += (float)random(-15, 16) / 10.0f;
-    g_lux_out    += random(-5000, 5001);
-
-    g_soil_moist = clampi(g_soil_moist, 20, 100);
-    g_lux_in     = clampi(g_lux_in, 0, 40000);
-    g_lux_out    = clampi(g_lux_out, 0, 60000);
-
-    Serial.println("[SENSOR NODE] Mesh inicializada");
-    Serial.printf("[SENSOR NODE] Simulando: %s e %s\n", NODE_INT, NODE_EXT);
+    Serial.printf("[SENSOR NODE] Publicando: %s (sensores reais)\n", NODE_INT);
     Serial.println("========================================");
 }
 
@@ -399,18 +374,18 @@ void loop()
 
     unsigned long now = millis();
 
-    // TELE periódica (sensores interno + externo) a cada 60 s
-    if (now - g_last_tele >= 60000UL) {   // 60 s
+    // TELE periódica a cada 60 s
+    if (now - g_last_tele >= 60000UL) {
         g_last_tele = now;
         send_tele_dump();
     }
 
-    // Heartbeat de todos os nós de sensores simulados a cada 10 s
-    if (now - g_last_hb_all >= 10000UL) { // 10 s
-        g_last_hb_all = now;
-        send_hb_all();
+    // Heartbeat a cada 10 s
+    if (now - g_last_hb >= 10000UL) {
+        g_last_hb = now;
+        send_hb();
     }
 
-    // Gerenciador de QoS (retry de mensagens QoS1, ex: HELLO)
+    // QoS (retry de mensagens QoS1, ex: HELLO)
     mesh_proto_qos_poll();
 }
