@@ -15,10 +15,9 @@
 #include "mesh_proto.h"
 #include "logger.h"
 
-/* >>> ADIÇÃO */
+// >>> ADICIONADO
 #include "environment_controller.h"
-#include "environment_config.h"
-/* <<< */
+// <<<
 
 static const char *TAG = "MESH_GW";
 
@@ -52,15 +51,6 @@ static void gen_msg_id(char *buf, size_t len)
     if (!g_msg_counter) g_msg_counter = 1;
     snprintf(buf, len, "%04X", (unsigned)g_msg_counter);
 }
-
-/* >>> ADIÇÃO: callback pro environment_controller enviar na mesh */
-static void env_mesh_send_cb(const char *json)
-{
-    if (!json) return;
-    g_mesh.sendBroadcast(json);
-    LOG("ENV", "AUTO->MESH: %s", json);
-}
-/* <<< */
 
 /**
  * @brief Envia ACK "ok" para uma mensagem QoS1 recebida pela MESH
@@ -118,6 +108,16 @@ static void forward_uart_to_mesh(const char *json)
     g_mesh.sendBroadcast(json);
     LOG("FRWD", "UART->MESH: %s", json);
 }
+
+// >>> ADICIONADO: callback de envio para o environment_controller
+static void env_send_to_mesh(const char *json)
+{
+    // O controller monta JSON "cfg" (ex.: dst="act-00")
+    // Aqui enviamos na mesh (broadcast).
+    g_mesh.sendBroadcast(json);
+    LOG("ENV", "AUTO->MESH: %s", json);
+}
+// <<<
 
 /**
  * @brief Envia HELLO QoS1 para o blynk_gateway_module via UART.
@@ -206,6 +206,11 @@ static void handle_uart_json(const char *json)
         return;
     }
 
+    // >>> ADICIONADO: informa o controller sobre comandos vindos da UART
+    // (principalmente cfg.mode para desligar/ligar AUTO)
+    env_ctrl_on_uart_msg(&msg, (uint32_t)millis());
+    // <<<
+
     // ACK para o próprio mesh_gateway (msh-gw) => QoS HELLO/TIME
     if (msg.type == MESH_MSG_ACK && strcmp(msg.dst, NODE_MSH_GW) == 0)
     {
@@ -219,23 +224,6 @@ static void handle_uart_json(const char *json)
         }
         return;
     }
-
-    /* >>> ADIÇÃO: Modo AUTO/MANUAL vindo do usuário
-       Envie do app/blynk como:
-       {"type":"cfg","src":"blynk-gw","dst":"msh-gw","data":{"mode":1}}
-       mode=1 => MANUAL (algoritmo desligado)
-       mode=0 => AUTO
-    */
-    if (msg.type == MESH_MSG_CFG &&
-        strcmp(msg.dst, NODE_MSH_GW) == 0 &&
-        msg.cfg.has_mode)
-    {
-        env_ctrl_set_mode((msg.cfg.mode != 0) ? ENV_MODE_MANUAL : ENV_MODE_AUTO);
-        LOG("UART", "CFG mode=%d aplicado no ENV_CTRL (dst=msh-gw)", msg.cfg.mode);
-        /* não precisa encaminhar essa msg para a mesh */
-        return;
-    }
-    /* <<< */
 
     if (!is_known_dst(msg.dst))
     {
@@ -256,9 +244,10 @@ static void handle_mesh_json(const char *json)
         return;
     }
 
-    /* >>> ADIÇÃO: alimenta o controller com telemetria SEM depender do dst */
-    env_ctrl_on_mesh_msg(&msg);
-    /* <<< */
+    // >>> ADICIONADO: informa o controller sobre msgs da MESH
+    // (telemetria e, principalmente, HB do act-00)
+    env_ctrl_on_mesh_msg(&msg, (uint32_t)millis());
+    // <<<
 
     // 1) ACK para mensagens QoS1 destinadas ao mesh-gw
     send_ack_to_mesh_if_needed(msg);
@@ -313,6 +302,11 @@ void mesh_gateway_init()
     // QoS via UART
     mesh_proto_qos_init(ipc_uart_send_json);
 
+    // >>> ADICIONADO: inicializa o controlador ambiental
+    // Ele só enviará AUTO após receber HB do act-00 e apenas on-change
+    env_ctrl_init(env_send_to_mesh);
+    // <<<
+
     // Envia HELLO QoS1 para o blynk_gateway
     send_hello_to_blynk_gw();
 
@@ -323,10 +317,6 @@ void mesh_gateway_init()
     g_mesh.onNewConnection(&mesh_new_connection_cb);
     g_mesh.onChangedConnections(&mesh_changed_connections_cb);
     g_mesh.onNodeTimeAdjusted(&mesh_time_adjusted_cb);
-
-    /* >>> ADIÇÃO: inicializa o controller ambiental */
-    env_ctrl_init(env_mesh_send_cb);
-    /* <<< */
 
     LOG(TAG, "mesh inicializada (prefix=%s, port=%d)", MESH_PREFIX, MESH_PORT);
 }
@@ -346,7 +336,7 @@ void mesh_gateway_loop()
     // QoS HELLO/TIME sobre UART
     mesh_proto_qos_poll();
 
-    /* >>> ADIÇÃO: roda controle AUTO (se não estiver em MANUAL) */
+    // >>> ADICIONADO: tick do controle ambiental
     env_ctrl_tick((uint32_t)millis());
-    /* <<< */
+    // <<<
 }

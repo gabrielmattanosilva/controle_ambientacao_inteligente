@@ -5,6 +5,8 @@
 #ifndef ENVIRONMENT_CONFIG_H
 #define ENVIRONMENT_CONFIG_H
 
+#define ENV_ACT_HB_TIMEOUT_MS     30000UL  // considera o act-00 "offline" se ficar 30s sem HB
+
 /* ======= Identificadores lógicos ======= */
 #define ENV_NODE_INT        "int-sen-00"
 #define ENV_NODE_EXT        "ext-sen-00"
