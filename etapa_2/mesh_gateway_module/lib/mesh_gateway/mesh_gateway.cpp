@@ -15,6 +15,11 @@
 #include "mesh_proto.h"
 #include "logger.h"
 
+/* >>> ADIÇÃO */
+#include "environment_controller.h"
+#include "environment_config.h"
+/* <<< */
+
 static const char *TAG = "MESH_GW";
 
 // Identificadores lógicos de nós
@@ -47,6 +52,15 @@ static void gen_msg_id(char *buf, size_t len)
     if (!g_msg_counter) g_msg_counter = 1;
     snprintf(buf, len, "%04X", (unsigned)g_msg_counter);
 }
+
+/* >>> ADIÇÃO: callback pro environment_controller enviar na mesh */
+static void env_mesh_send_cb(const char *json)
+{
+    if (!json) return;
+    g_mesh.sendBroadcast(json);
+    LOG("ENV", "AUTO->MESH: %s", json);
+}
+/* <<< */
 
 /**
  * @brief Envia ACK "ok" para uma mensagem QoS1 recebida pela MESH
@@ -139,14 +153,10 @@ static void send_hello_to_blynk_gw()
 
 /**
  * @brief Envia TIME QoS1 para o blynk_gateway_module com base no RTC interno.
- *
- * Assume que o RTC interno do ESP32 já foi sincronizado (via DS1307 ou NTP)
- * antes de chamarmos esta função.
  */
 static void send_time_to_blynk_gw()
 {
     time_t now = time(nullptr);
-    // Ajuste se quiser outro fuso; aqui usamos -3h (BRT).
     const int TZ_OFFSET_MIN = -3 * 60;
 
     char id[8];
@@ -187,14 +197,6 @@ static bool is_known_dst(const char *dst)
 // Handlers de mensagens
 // -----------------------------------------------------------------------------
 
-/**
- * @brief Trata mensagens recebidas da UART (vindas do blynk_gateway_module).
- *
- * - Faz o parse com mesh_proto_parse para poder filtrar por dst e type.
- * - Tratar ACK destinados ao NODE_MSH_GW (QoS de HELLO/TIME).
- * - Repassa para a mesh qualquer mensagem válida cujo dst seja um nó conhecido
- *   (NODE_INT, NODE_EXT, NODE_ACT, NODE_BLYNK_GW, NODE_MSH_GW ou "*").
- */
 static void handle_uart_json(const char *json)
 {
     mesh_msg_t msg;
@@ -204,43 +206,47 @@ static void handle_uart_json(const char *json)
         return;
     }
 
-    // Primeiro: se for ACK para o próprio mesh_gateway (msh-gw),
-    // tratamos QoS e NÃO encaminhamos para a mesh.
+    // ACK para o próprio mesh_gateway (msh-gw) => QoS HELLO/TIME
     if (msg.type == MESH_MSG_ACK && strcmp(msg.dst, NODE_MSH_GW) == 0)
     {
-        // Atualiza gerenciador de QoS interno (HELLO/TIME)
         mesh_proto_qos_on_ack(&msg);
 
-        // Se este ACK for do nosso HELLO, dispara o envio de TIME QoS1
         if (msg.ack.has_ref &&
             strcmp(msg.ack.ref, g_last_hello_id) == 0)
         {
             LOG("UART", "ACK do HELLO recebido, enviando TIME QoS1");
             send_time_to_blynk_gw();
         }
-        return; // ACK para msh-gw não vai para a mesh
+        return;
     }
 
-    // Se o dst não é um nó conhecido da nossa rede, ignoramos
+    /* >>> ADIÇÃO: Modo AUTO/MANUAL vindo do usuário
+       Envie do app/blynk como:
+       {"type":"cfg","src":"blynk-gw","dst":"msh-gw","data":{"mode":1}}
+       mode=1 => MANUAL (algoritmo desligado)
+       mode=0 => AUTO
+    */
+    if (msg.type == MESH_MSG_CFG &&
+        strcmp(msg.dst, NODE_MSH_GW) == 0 &&
+        msg.cfg.has_mode)
+    {
+        env_ctrl_set_mode((msg.cfg.mode != 0) ? ENV_MODE_MANUAL : ENV_MODE_AUTO);
+        LOG("UART", "CFG mode=%d aplicado no ENV_CTRL (dst=msh-gw)", msg.cfg.mode);
+        /* não precisa encaminhar essa msg para a mesh */
+        return;
+    }
+    /* <<< */
+
     if (!is_known_dst(msg.dst))
     {
         LOG("UART", "RX ignorado dst=\"%s\"", msg.dst);
         return;
     }
 
-    // Qualquer outra mensagem (CFG, EVT, TELE, STATE...) é apenas
-    // repassada "burra" para a mesh, respeitando o dst lógico que veio.
+    // Encaminha “burro” para a mesh (inclui comandos manuais pro act-00)
     forward_uart_to_mesh(json);
 }
 
-
-/**
- * @brief Trata mensagens recebidas da MESH.
- *
- * - Faz parse com mesh_proto_parse;
- * - Envia ACK para mensagens QoS1 destinadas ao mesh-gw;
- * - Encaminha para a UART apenas o que estiver endereçado a blynk-gw ou "*".
- */
 static void handle_mesh_json(const char *json)
 {
     mesh_msg_t msg;
@@ -250,6 +256,10 @@ static void handle_mesh_json(const char *json)
         return;
     }
 
+    /* >>> ADIÇÃO: alimenta o controller com telemetria SEM depender do dst */
+    env_ctrl_on_mesh_msg(&msg);
+    /* <<< */
+
     // 1) ACK para mensagens QoS1 destinadas ao mesh-gw
     send_ack_to_mesh_if_needed(msg);
 
@@ -257,12 +267,10 @@ static void handle_mesh_json(const char *json)
     if (strcmp(msg.dst, NODE_BLYNK_GW) != 0 &&
         strcmp(msg.dst, "*") != 0)
     {
-        // Não é para o Blynk → fica só no lado mesh mesmo
         LOG("MESH", "RX nao encaminhado para UART dst=\"%s\"", msg.dst);
         return;
     }
 
-    // Gateway "burro": só encaminha para UART
     forward_mesh_to_uart(json);
 }
 
@@ -302,10 +310,10 @@ void mesh_gateway_init()
 
     LOG(TAG, "Inicializando mesh_gateway...");
 
-    // Gerenciador de QoS da lib usando o transporte UART já inicializado
+    // QoS via UART
     mesh_proto_qos_init(ipc_uart_send_json);
 
-    // Envia HELLO QoS1 para o blynk_gateway assim que UART/QoS estiverem prontos
+    // Envia HELLO QoS1 para o blynk_gateway
     send_hello_to_blynk_gw();
 
     // Inicializa rede mesh
@@ -316,15 +324,18 @@ void mesh_gateway_init()
     g_mesh.onChangedConnections(&mesh_changed_connections_cb);
     g_mesh.onNodeTimeAdjusted(&mesh_time_adjusted_cb);
 
+    /* >>> ADIÇÃO: inicializa o controller ambiental */
+    env_ctrl_init(env_mesh_send_cb);
+    /* <<< */
+
     LOG(TAG, "mesh inicializada (prefix=%s, port=%d)", MESH_PREFIX, MESH_PORT);
 }
 
 void mesh_gateway_loop()
 {
-    // Atualiza a stack da mesh
     g_mesh.update();
 
-    // Verifica se chegou algo da UART
+    // UART RX (blynk_gateway_module)
     char json[256];
     if (ipc_uart_read_json(json, sizeof(json)))
     {
@@ -332,6 +343,10 @@ void mesh_gateway_loop()
         handle_uart_json(json);
     }
 
-    // Gerenciador de QoS da lib (HELLO/TIME QoS1 sobre UART)
+    // QoS HELLO/TIME sobre UART
     mesh_proto_qos_poll();
+
+    /* >>> ADIÇÃO: roda controle AUTO (se não estiver em MANUAL) */
+    env_ctrl_tick((uint32_t)millis());
+    /* <<< */
 }

@@ -1,21 +1,30 @@
 /**
  * @file main.cpp
- * @brief Nó ext-sen-00 (SIMULADO)
+ * @brief Nó ext-sen-00 (sensores reais)
  *
- * Mantém a mesma lógica do nó anterior:
+ * Baseado no firmware do int-sen-00 (sensores reais), mantendo a mesma lógica:
  *  - Envia TELE periódica (60s) para o blynk-gw
- *  - Envia HB (10s)
+ *  - Envia HB (10s) do ext-sen-00
  *  - Envia HELLO QoS1 uma vez ao conectar na mesh
- *  - Faz mesh_proto_qos_poll() no loop
+ *  - Faz mesh_proto_qos_poll() no loop (retries QoS1)
  *
- * Diferença:
- *  - Não usa sensores reais: simula apenas o ext-sen-00 (t_out, rh_out, lux_out)
+ * Alterações pedidas:
+ *  - Nó renomeado para "ext-sen-00"
+ *  - Removido sensor de umidade do solo
+ *  - TELE agora publica: t_out, rh_out, lux_out
+ *
+ * Sensores reais (I2C):
+ *  - AHTX0 (temperatura/umidade)
+ *  - BH1750 (lux)
  */
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <painlessMesh.h>
 #include <WiFi.h>
+#include <Wire.h>
+#include <Adafruit_AHTX0.h>
+#include <BH1750.h>
 
 #include "credentials.h"
 #include "mesh_proto.h"
@@ -30,15 +39,24 @@
 // -----------------------------------------------------------------------------
 // Objetos da mesh
 // -----------------------------------------------------------------------------
-Scheduler userScheduler;
+Scheduler       userScheduler;
 static painlessMesh mesh;
 
 // -----------------------------------------------------------------------------
-// Estado simulado (ext)
+// Sensores reais
 // -----------------------------------------------------------------------------
-static float g_t_out  = 26.5f;   // °C
-static float g_rh_out = 55.0f;   // %
-static int   g_lux_out = 1200;   // lux
+static Adafruit_AHTX0 g_aht;
+static BH1750         g_bh1750;
+
+static bool g_aht_ok = false;
+static bool g_bh_ok  = false;
+
+// -----------------------------------------------------------------------------
+// Últimos valores lidos (externo)
+// -----------------------------------------------------------------------------
+static float g_t_out   = NAN;
+static float g_rh_out  = NAN;
+static int   g_lux_out = -1;   // lux
 
 // -----------------------------------------------------------------------------
 // Controle de envio
@@ -84,21 +102,36 @@ static void mesh_send_json_cb(const char *json)
 }
 
 // -----------------------------------------------------------------------------
-// Simulação de sensores (ext)
+// Leitura dos sensores reais (externo)
 // -----------------------------------------------------------------------------
-static void simulate_ext_step()
+static void read_sensors_step()
 {
-    // Variações pequenas e suaves (random walk)
-    float dt = ((int)random(-12, 13)) / 100.0f;   // -0.12 .. +0.12
-    float dh = ((int)random(-25, 26)) / 100.0f;   // -0.25 .. +0.25
-    int   dl = random(-150, 151);                 // -150 .. +150
+    // AHT (temp/umidade)
+    if (g_aht_ok) {
+        sensors_event_t hum, temp;
+        bool ok = g_aht.getEvent(&hum, &temp);
+        if (ok) {
+            g_t_out  = temp.temperature;
+            g_rh_out = hum.relative_humidity;
+        } else {
+            Serial.println("[SENS] AHT getEvent() falhou (mantendo últimos valores)");
+        }
+    }
 
-    g_t_out  = clampf(g_t_out + dt,  10.0f, 45.0f);
-    g_rh_out = clampf(g_rh_out + dh,  0.0f, 100.0f);
-    g_lux_out = clampi(g_lux_out + dl, 0, 200000);
+    // BH1750 (lux)
+    if (g_bh_ok) {
+        float lux = g_bh1750.readLightLevel();
+        if (!isnan(lux) && lux >= 0.0f) {
+            g_lux_out = (int)lroundf(lux);
+        } else {
+            Serial.println("[SENS] BH1750 readLightLevel() invalido (mantendo últimos valores)");
+        }
+    }
 
-    // Pequena “tendência” diária simulada (opcional): depende de millis()
-    // (mantém simples e determinístico)
+    // Sanity clamp (opcional)
+    if (!isnan(g_t_out))  g_t_out  = clampf(g_t_out,  -10.0f,  80.0f);
+    if (!isnan(g_rh_out)) g_rh_out = clampf(g_rh_out,   0.0f, 100.0f);
+    if (g_lux_out >= 0)   g_lux_out = clampi(g_lux_out, 0, 200000);
 }
 
 // -----------------------------------------------------------------------------
@@ -107,11 +140,12 @@ static void simulate_ext_step()
 static void send_tele_dump()
 {
     JsonDocument doc;
-    JsonObject data;
+    JsonObject   data;
     char id[8];
     char json[256];
 
-    simulate_ext_step();
+    // Atualiza sensores reais
+    read_sensors_step();
 
     gen_msg_id(id, sizeof(id));
     doc.clear();
@@ -123,9 +157,9 @@ static void send_tele_dump()
     doc["type"] = "tele";
 
     data = doc["data"].to<JsonObject>();
-    data["t_out"]   = g_t_out;
-    data["rh_out"]  = g_rh_out;
-    data["lux_out"] = g_lux_out;
+    if (!isnan(g_t_out))   data["t_out"]   = g_t_out;
+    if (!isnan(g_rh_out))  data["rh_out"]  = g_rh_out;
+    if (g_lux_out >= 0)    data["lux_out"] = g_lux_out;
 
     serializeJson(doc, json, sizeof(json));
     mesh_send_json_cb(json);
@@ -168,8 +202,8 @@ static void send_hello()
                                 NODE_EXT,
                                 NODE_MSH_GW,
                                 NODE_EXT,
-                                "1.0.0-sim",
-                                "external sensor simulated",
+                                "1.0.0-real",
+                                "external sensors (real)",
                                 json,
                                 sizeof(json))) {
         return;
@@ -267,11 +301,21 @@ void setup()
     Serial.begin(115200);
     delay(500);
 
-    randomSeed((uint32_t)esp_random());
+    Serial.println("========================================");
+    Serial.println("[ext-sen-00] Sensor Node Boot (REAL)");
+    Serial.println("========================================");
 
-    Serial.println("========================================");
-    Serial.println("[ext-sen-00] Sensor Node Boot (SIM)");
-    Serial.println("========================================");
+    // I2C
+    Wire.begin();
+
+    // Inicializa sensores reais
+    g_aht_ok = g_aht.begin();
+    if (g_aht_ok) Serial.println("[SENS] AHTX0 OK");
+    else          Serial.println("[SENS] AHTX0 FALHOU");
+
+    g_bh_ok = g_bh1750.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
+    if (g_bh_ok) Serial.println("[SENS] BH1750 OK");
+    else         Serial.println("[SENS] BH1750 FALHOU");
 
     // Inicializa rede mesh
     mesh.setDebugMsgTypes(ERROR | STARTUP);
@@ -284,7 +328,10 @@ void setup()
     // QoS da lib (HELLO QoS1, ACK, etc.)
     mesh_proto_qos_init(mesh_send_json_cb);
 
-    Serial.printf("[SENSOR NODE] Publicando: %s (simulado)\n", NODE_EXT);
+    // Primeira leitura no boot
+    read_sensors_step();
+
+    Serial.printf("[SENSOR NODE] Publicando: %s (sensores reais)\n", NODE_EXT);
     Serial.println("========================================");
 }
 
