@@ -17,8 +17,8 @@
 #include <ArduinoJson.h>
 #include <painlessMesh.h>
 #include <FastLED.h>
-
-#include "credentials.h"   // MESH_PREFIX, MESH_PASSWORD, MESH_PORT
+#include "pins.h"
+#include "credentials.h"
 #include "mesh_proto.h"
 
 // -----------------------------------------------------------------------------
@@ -31,41 +31,13 @@
 // Neste nó, tudo vai para o blynk-gw
 #define NODE_SINK       NODE_BLYNK_GW
 
-// -----------------------------------------------------------------------------
-// Pinagem / HW (baseado no estufa_esp32_platformio)
-// -----------------------------------------------------------------------------
-#ifndef FAN_INTERNO_PIN
-#define FAN_INTERNO_PIN   25
-#endif
-#ifndef FAN_EXTERNO_PIN
-#define FAN_EXTERNO_PIN   27
-#endif
-#ifndef NEBULIZADOR_PIN
-#define NEBULIZADOR_PIN   26
-#endif
-#ifndef BOMBA_PIN
-#define BOMBA_PIN         33
-#endif
-#ifndef LED_DATA_PIN
-#define LED_DATA_PIN      14
-#endif
 
-#ifndef PWM_FREQ_HZ
+
 #define PWM_FREQ_HZ       25000
-#endif
-#ifndef PWM_RES_BITS
-#define PWM_RES_BITS      8          // 0..255
-#endif
-#ifndef FAN_IN_CHANNEL
+#define PWM_RES_BITS      8
 #define FAN_IN_CHANNEL    0
-#endif
-#ifndef FAN_EX_CHANNEL
 #define FAN_EX_CHANNEL    1
-#endif
-
-#ifndef NUM_LEDS
 #define NUM_LEDS          300        // ajuste conforme sua fita
-#endif
 
 // Observação: no seu controle “estufa_esp32_platformio” havia BRG.
 // Se sua cor ficar trocada, troque BRG por GRB.
