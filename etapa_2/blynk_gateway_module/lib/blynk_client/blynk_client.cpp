@@ -527,8 +527,8 @@ void blynk_client_init()
     Blynk.config(BLYNK_AUTH_TOKEN);
     Blynk.connect();
 
-    /* Heartbeat simples do próprio blynk-gw em V20 */
-    g_timer.setInterval(10000L, []()
+    /* Heartbeat de 60s do próprio blynk-gw em V20 */
+    g_timer.setInterval(60000L, []()
                         {
         long up = millis() / 1000;
         Blynk.virtualWrite(20, up); });
