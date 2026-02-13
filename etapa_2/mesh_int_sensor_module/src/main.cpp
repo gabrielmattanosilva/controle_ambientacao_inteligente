@@ -2,9 +2,9 @@
  * @file main.cpp
  * @brief Nó int-sen-00
  *
- * Lógica mantida:
- *  - Envia TELE periódica (60s) para o blynk-gw
- *  - Envia HB (10s) do int-sen-00
+ * Lógica:
+ *  - Envia TELE periódica para o blynk-gw
+ *  - Envia HB periódica do int-sen-00
  *  - Envia HELLO QoS1 uma vez ao conectar na mesh
  *  - Faz mesh_proto_qos_poll() no loop (retries QoS1)
  *
@@ -32,6 +32,12 @@
 #define NODE_INT "int-sen-00"
 #define NODE_BLYNK_GW "blynk-gw"
 #define NODE_MSH_GW "msh-gw"
+
+// -----------------------------------------------------------------------------
+// Períodos (ms)
+// -----------------------------------------------------------------------------
+#define TELE_PERIOD_MS (300000UL) // 5 minutos
+#define HB_PERIOD_MS   (60000UL)  // 1 minuto
 
 // -----------------------------------------------------------------------------
 // Objetos da mesh
@@ -63,7 +69,7 @@ static int g_lux_in = -1;     // lux
 static uint16_t g_msg_counter = 0;
 static unsigned long g_last_tele = 0;
 static unsigned long g_last_hb = 0;
-static bool g_hello_sent = false;
+static bool g_hello_sent = false; // controla o "primeiro connect" (handshake + burst inicial)
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -277,11 +283,22 @@ void mesh_new_connection_cb(uint32_t nodeId)
 {
     Serial.printf("[MESH] New connection, nodeId=%u\n", nodeId);
 
+    // Primeira vez que a mesh formou conexão: manda HELLO (QoS1) + "burst" inicial (HB + TELE)
     if (!g_hello_sent)
     {
         g_hello_sent = true;
-        Serial.println("[MESH] Primeira conexao estabelecida, enviando HELLO QoS1.");
+
+        Serial.println("[MESH] Primeira conexao estabelecida, enviando HELLO QoS1 + HB + TELE imediatos.");
         send_hello();
+
+        // Envia imediatamente para não perder os primeiros dados no gateway/blynk
+        send_hb();
+        send_tele_dump();
+
+        // Atualiza timers para evitar repetir logo no loop
+        unsigned long now = millis();
+        g_last_hb = now;
+        g_last_tele = now;
     }
 }
 
@@ -350,15 +367,15 @@ void loop()
 
     unsigned long now = millis();
 
-    // TELE periódica a cada 60 s
-    if (now - g_last_tele >= 60000UL)
+    // TELE periódica a cada 5 min
+    if (now - g_last_tele >= TELE_PERIOD_MS)
     {
         g_last_tele = now;
         send_tele_dump();
     }
 
-    // Heartbeat a cada 10 s
-    if (now - g_last_hb >= 10000UL)
+    // Heartbeat a cada 1 min
+    if (now - g_last_hb >= HB_PERIOD_MS)
     {
         g_last_hb = now;
         send_hb();

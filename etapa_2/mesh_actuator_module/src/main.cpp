@@ -2,15 +2,15 @@
  * @file main.cpp
  * @brief Nó act-00 (atuadores) REAL via painlessMesh + mesh_proto
  *
- * Substitui o "simulador" por acionamento real dos atuadores:
- *  - Fan interno/exaustor via LEDC PWM (0..255)
- *  - Nebulizador e bomba via GPIO digital (0/1)
- *  - Fita WS2811 via FastLED:
- *      brilho vindo do Blynk: 0..100 (%)
- *      cor: string HEX "RRGGBB" (aceita também "#RRGGBB" e "0xRRGGBB")
+ * Ajuste solicitado:
+ *  - Enviar HB na primeira conexão com a mesh
+ *  - Depois enviar HB a cada 1 minuto
  *
- * Mantém o protocolo mesh_proto (CFG/STATE/HB/HELLO/QoS).
- * Mantém comportamento: comandos só aplicam em modo MANUAL (mode=1).
+ * Mantido:
+ *  - HELLO QoS1 uma vez ao conectar na mesh
+ *  - STATE inicial
+ *  - QoS poll no loop
+ *  - Comandos CFG aplicam apenas em modo MANUAL (mode=1)
  */
 
 #include <Arduino.h>
@@ -31,8 +31,14 @@
 // Neste nó, tudo vai para o blynk-gw
 #define NODE_SINK       NODE_BLYNK_GW
 
+// -----------------------------------------------------------------------------
+// Períodos
+// -----------------------------------------------------------------------------
+#define HB_PERIOD_MS    (60000UL)   // 1 minuto
 
-
+// -----------------------------------------------------------------------------
+// PWM / LEDs
+// -----------------------------------------------------------------------------
 #define PWM_FREQ_HZ       25000
 #define PWM_RES_BITS      8
 #define FAN_IN_CHANNEL    0
@@ -69,9 +75,10 @@ static bool g_act_dirty   = true;     // aplica no boot
 // -----------------------------------------------------------------------------
 // Controle de envio / contadores
 // -----------------------------------------------------------------------------
-static uint16_t      g_msg_counter = 0;
-static unsigned long g_last_hb     = 0;
-static bool          g_hello_sent  = false;
+static uint16_t      g_msg_counter      = 0;
+static unsigned long g_last_hb          = 0;
+static bool          g_hello_sent       = false;
+static bool          g_hb_sent_on_mesh  = false; // <- NOVO: garante HB apenas na 1ª conexão
 
 // -----------------------------------------------------------------------------
 // Helpers (C-like)
@@ -258,6 +265,7 @@ static void send_hb(void)
 
     gen_msg_id(id, sizeof(id));
 
+    // Mantive como estava: rssi “fake” para dar variação (se quiser, troco pra WiFi.RSSI())
     int rssi_dbm = -60 + random(-3, 4);
 
     if (!mesh_proto_build_hb(id,
@@ -423,19 +431,22 @@ void mesh_new_connection_cb(uint32_t nodeId)
 {
     Serial.printf("[MESH] New connection, nodeId=%u\n", nodeId);
 
-    // HB imediato (com throttle)
-    unsigned long now = millis();
-    if (now - g_last_hb > 2000UL)
+    // HB imediato APENAS na 1ª conexão (pedido)
+    if (!g_hb_sent_on_mesh)
     {
-        g_last_hb = now;
+        g_hb_sent_on_mesh = true;
+        Serial.println("[MESH] Primeira conexao: enviando HB imediato.");
         send_hb();
+
+        // atualiza o timer pra não disparar de novo no loop logo em seguida
+        g_last_hb = millis();
     }
 
     // HELLO uma vez
     if (!g_hello_sent)
     {
         g_hello_sent = true;
-        Serial.println("[MESH] Primeira conexao, enviando HELLO QoS1 do act-00...");
+        Serial.println("[MESH] Primeira conexao: enviando HELLO QoS1 do act-00...");
         send_hello();
 
         // STATE inicial
@@ -475,7 +486,7 @@ void setup()
     strncpy(g_led_rgb, "000000", sizeof(g_led_rgb) - 1);
     g_led_rgb[sizeof(g_led_rgb) - 1] = '\0';
     g_act_dirty = true;
-    actuators_apply_if_dirty(); // em AUTO não aplica (mantém), mas deixa “dirty” limpo
+    actuators_apply_if_dirty(); // em AUTO não aplica (mantém), mas limpa dirty
 
     // Mesh init
     mesh.setDebugMsgTypes(ERROR | STARTUP);
@@ -497,8 +508,8 @@ void loop()
 
     unsigned long now = millis();
 
-    // Heartbeat a cada 10 s
-    if (now - g_last_hb >= 10000UL)
+    // Heartbeat a cada 1 minuto
+    if (now - g_last_hb >= HB_PERIOD_MS)
     {
         g_last_hb = now;
         send_hb();
