@@ -1,16 +1,14 @@
 /**
- * @file main.cpp
- * @brief Nó act-00 (atuadores) REAL via painlessMesh + mesh_proto
- *
- * Ajuste solicitado:
- *  - Enviar HB na primeira conexão com a mesh
- *  - Depois enviar HB a cada 1 minuto
- *
  * Mantido:
  *  - HELLO QoS1 uma vez ao conectar na mesh
  *  - STATE inicial
  *  - QoS poll no loop
  *  - Comandos CFG aplicam apenas em modo MANUAL (mode=1)
+ *
+ * ATUALIZADO:
+ *  - Em AUTO (mode=0) aplica comandos CFG vindos do msh-gw (environment_controller);
+ *  - Em MANUAL (mode=1) aplica fans/LED apenas do blynk-gw;
+ *  - humidifier/irrigation sempre vêm do msh-gw (duty-cycle / segurança no gateway).
  */
 
 #include <Arduino.h>
@@ -63,8 +61,8 @@ static painlessMesh mesh;
 // Estado dos atuadores (act-00)
 // -----------------------------------------------------------------------------
 static int  g_mode        = 0;        // 0=AUTO, 1=MANUAL
-static int  g_intake_pwm  = 0;        // 0..255
-static int  g_exhaust_pwm = 0;        // 0..255
+static int  g_intake_pwm  = 0;        // 0..100 (percentual)
+static int  g_exhaust_pwm = 0;        // 0..100 (percentual)
 static int  g_humidifier  = 0;        // 0/1
 static int  g_irrigation  = 0;        // 0/1
 static int  g_led_pwm     = 0;        // brilho em % (0..100)
@@ -180,21 +178,18 @@ static void actuators_init(void)
     FastLED.show();
 }
 
-// Aplica o estado atual nos atuadores reais (aplica apenas se MANUAL)
+// Aplica o estado atual nos atuadores reais
+// (em AUTO recebe do msh-gw; em MANUAL recebe do blynk-gw; relés sempre do msh-gw)
 static void actuators_apply_if_dirty(void)
 {
     if (!g_act_dirty) return;
 
-    // Segurança: em AUTO, não aplica comandos vindos de CFG (mantém comportamento anterior)
-    if (g_mode != 1)
-    {
-        g_act_dirty = false;
-        return;
-    }
+    // Fans: protocolo usa % (0..100) -> duty 0..255
+    int inPct = clamp_int(g_intake_pwm, 0, 100);
+    int exPct = clamp_int(g_exhaust_pwm, 0, 100);
+    int inDuty = (int)percent_to_255(inPct);
+    int exDuty = (int)percent_to_255(exPct);
 
-    // Fans 0..255
-    int inDuty = clamp_int(g_intake_pwm, 0, 255);
-    int exDuty = clamp_int(g_exhaust_pwm, 0, 255);
     ledcWrite(FAN_IN_CHANNEL, (uint32_t)inDuty);
     ledcWrite(FAN_EX_CHANNEL, (uint32_t)exDuty);
 
@@ -214,8 +209,8 @@ static void actuators_apply_if_dirty(void)
 
     g_act_dirty = false;
 
-    Serial.printf("[ACT APPLY] mode=%d in=%d ex=%d hum=%d irr=%d led_pct=%d rgb=%s\n",
-                  g_mode, inDuty, exDuty, g_humidifier, g_irrigation, g_led_pwm, g_led_rgb);
+    Serial.printf("[ACT APPLY] mode=%d inPct=%d(inDuty=%d) exPct=%d(exDuty=%d) hum=%d irr=%d led_pct=%d rgb=%s\n",
+                  g_mode, inPct, inDuty, exPct, exDuty, g_humidifier, g_irrigation, g_led_pwm, g_led_rgb);
 }
 
 // -----------------------------------------------------------------------------
@@ -243,8 +238,8 @@ static void send_state_now(void)
                                    0,              // QoS0
                                    NODE_ACT,
                                    NODE_SINK,
-                                   g_intake_pwm,
-                                   g_exhaust_pwm,
+                                   g_intake_pwm,   // % (0..100)
+                                   g_exhaust_pwm,  // % (0..100)
                                    g_humidifier,
                                    g_led_pwm,       // led_brig (0..100)
                                    g_led_rgb,       // "RRGGBB"
@@ -266,14 +261,14 @@ static void send_hb(void)
     gen_msg_id(id, sizeof(id));
 
     // Mantive como estava: rssi “fake” para dar variação (se quiser, troco pra WiFi.RSSI())
-    int rssi_dbm = -60 + random(-3, 4);
+    int rssi_fake = -50 - (int)(millis() % 20);
 
     if (!mesh_proto_build_hb(id,
                             (uint32_t)millis(),
                             NODE_ACT,
                             NODE_SINK,
                             (int)(millis() / 1000),
-                            rssi_dbm,
+                            rssi_fake,
                             json,
                             sizeof(json)))
     {
@@ -312,62 +307,121 @@ static void send_hello(void)
 }
 
 // -----------------------------------------------------------------------------
-// Aplicar CFG recebido (MANUAL)
+// Aplicar CFG recebido (AUTO/MANUAL)
 // -----------------------------------------------------------------------------
 static void apply_cfg(const mesh_msg_t *msg)
 {
     if (!msg) return;
 
-    // Atualiza modo se veio
+    bool changed = false;
+
+    const bool from_mesh_gw = (strcmp(msg->src, NODE_MSH_GW) == 0);
+    const bool from_blynk   = (strcmp(msg->src, NODE_BLYNK_GW) == 0);
+
+    // Atualiza modo se veio (sempre aceita)
     if (msg->cfg.has_mode)
     {
-        g_mode = msg->cfg.mode;
+        int new_mode = msg->cfg.mode ? 1 : 0;
+        if (new_mode != g_mode)
+        {
+            g_mode = new_mode;
+            changed = true;
+        }
     }
 
-    // Em MANUAL, aplica campos presentes
-    if (g_mode == 1)
+    // AUTO: aceita apenas comandos vindos do msh-gw (environment_controller)
+    const bool allow_auto = (g_mode == 0) && from_mesh_gw;
+
+    // MANUAL: aceita fans/leds apenas do blynk-gw
+    const bool allow_manual_ui = (g_mode == 1) && from_blynk;
+
+    // Bombas/relés: SEMPRE aceitar apenas do msh-gw (duty-cycle / segurança no gateway)
+    const bool allow_relays = from_mesh_gw;
+
+    // Fans (0..100 em %)
+    if (msg->cfg.has_intake_pwm && (allow_auto || allow_manual_ui))
     {
-        if (msg->cfg.has_intake_pwm)  g_intake_pwm  = msg->cfg.intake_pwm;   // 0..255
-        if (msg->cfg.has_exhaust_pwm) g_exhaust_pwm = msg->cfg.exhaust_pwm;  // 0..255
-        if (msg->cfg.has_humidifier)  g_humidifier  = msg->cfg.humidifier;   // 0/1
-        if (msg->cfg.has_irrigation)  g_irrigation  = msg->cfg.irrigation;   // 0/1
-
-        if (msg->cfg.has_led_pwm)
+        int v = clamp_int(msg->cfg.intake_pwm, 0, 100);
+        if (v != g_intake_pwm)
         {
-            // esperado do Blynk: 0..100
-            g_led_pwm = clamp_int(msg->cfg.led_pwm, 0, 100);
+            g_intake_pwm = v;
+            changed = true;
         }
+    }
 
-        if (msg->cfg.has_led_rgb)
+    if (msg->cfg.has_exhaust_pwm && (allow_auto || allow_manual_ui))
+    {
+        int v = clamp_int(msg->cfg.exhaust_pwm, 0, 100);
+        if (v != g_exhaust_pwm)
         {
-            char norm[7];
-            if (normalize_hex6(msg->cfg.led_rgb, norm, sizeof(norm)))
+            g_exhaust_pwm = v;
+            changed = true;
+        }
+    }
+
+    // Relés (0/1) — só do msh-gw
+    if (msg->cfg.has_humidifier && allow_relays)
+    {
+        int v = msg->cfg.humidifier ? 1 : 0;
+        if (v != g_humidifier)
+        {
+            g_humidifier = v;
+            changed = true;
+        }
+    }
+
+    if (msg->cfg.has_irrigation && allow_relays)
+    {
+        int v = msg->cfg.irrigation ? 1 : 0;
+        if (v != g_irrigation)
+        {
+            g_irrigation = v;
+            changed = true;
+        }
+    }
+
+    // LEDs (0..100 + "RRGGBB")
+    if (msg->cfg.has_led_pwm && (allow_auto || allow_manual_ui))
+    {
+        int v = clamp_int(msg->cfg.led_pwm, 0, 100);
+        if (v != g_led_pwm)
+        {
+            g_led_pwm = v;
+            changed = true;
+        }
+    }
+
+    if (msg->cfg.has_led_rgb && (allow_auto || allow_manual_ui))
+    {
+        char norm[7];
+        if (normalize_hex6(msg->cfg.led_rgb, norm, sizeof(norm)))
+        {
+            if (strncmp(g_led_rgb, norm, 6) != 0)
             {
                 strncpy(g_led_rgb, norm, sizeof(g_led_rgb) - 1);
                 g_led_rgb[sizeof(g_led_rgb) - 1] = '\0';
-            }
-            else
-            {
-                Serial.printf("[CFG] led_rgb invalido: '%s'\n", msg->cfg.led_rgb);
+                changed = true;
             }
         }
-
-        g_act_dirty = true;
+        else
+        {
+            Serial.printf("[CFG] led_rgb invalido: '%s'\n", msg->cfg.led_rgb);
+        }
     }
-    else
+
+    Serial.printf("[CFG] src=%s mode=%d allow_auto=%d allow_ui=%d allow_relays=%d -> in=%d ex=%d hum=%d irr=%d led_pct=%d led_rgb=%s changed=%d\n",
+                  msg->src, g_mode,
+                  allow_auto ? 1 : 0, allow_manual_ui ? 1 : 0, allow_relays ? 1 : 0,
+                  g_intake_pwm, g_exhaust_pwm, g_humidifier, g_irrigation, g_led_pwm, g_led_rgb,
+                  changed ? 1 : 0);
+
+    // Aplica imediatamente se houve mudança e publica STATE (para refletir no Blynk)
+    if (changed)
     {
-        // AUTO: ignora comandos (mantém comportamento do simulador)
+        g_act_dirty = true;
+        actuators_apply_if_dirty();
+        send_state_now();
     }
-
-    Serial.printf("[CFG] mode=%d, intake=%d, exhaust=%d, hum=%d, irr=%d, led_pwm=%d, led_rgb=%s\n",
-                  g_mode, g_intake_pwm, g_exhaust_pwm,
-                  g_humidifier, g_irrigation, g_led_pwm, g_led_rgb);
-
-    // Aplica imediatamente (se MANUAL)
-    actuators_apply_if_dirty();
-
-    // Envia STATE refletindo o estado atual
-    send_state_now();
 
     // Se CFG era QoS1, ACK ok
     mesh_proto_qos_send_ack_ok(msg);
@@ -477,47 +531,39 @@ void setup()
 
     // HW init (estado seguro)
     actuators_init();
-    g_mode = 0;            // inicia em AUTO
-    g_intake_pwm = 0;
-    g_exhaust_pwm = 0;
-    g_humidifier = 0;
-    g_irrigation = 0;
-    g_led_pwm = 0;
-    strncpy(g_led_rgb, "000000", sizeof(g_led_rgb) - 1);
-    g_led_rgb[sizeof(g_led_rgb) - 1] = '\0';
-    g_act_dirty = true;
-    actuators_apply_if_dirty(); // em AUTO não aplica (mantém), mas limpa dirty
 
-    // Mesh init
+    // inicia em AUTO
+    g_mode = 0;
+
+    // QoS init: usa callback de envio por mesh
+    mesh_proto_qos_init(mesh_send_json_cb);
+
+    // Mesh
     mesh.setDebugMsgTypes(ERROR | STARTUP);
     mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
+
     mesh.onReceive(&mesh_receive_cb);
     mesh.onNewConnection(&mesh_new_connection_cb);
     mesh.onChangedConnections(&mesh_changed_connections_cb);
     mesh.onNodeTimeAdjusted(&mesh_time_adjusted_cb);
 
-    // QoS init (HELLO QoS1, ACK de CFG, etc.)
-    mesh_proto_qos_init(mesh_send_json_cb);
-
-    Serial.println("[act-00] mesh inicializada");
+    g_last_hb = millis();
 }
 
 void loop()
 {
     mesh.update();
 
-    unsigned long now = millis();
+    // QoS poll
+    mesh_proto_qos_poll();
 
-    // Heartbeat a cada 1 minuto
-    if (now - g_last_hb >= HB_PERIOD_MS)
+    // HB periódico
+    if ((millis() - g_last_hb) >= HB_PERIOD_MS)
     {
-        g_last_hb = now;
+        g_last_hb = millis();
         send_hb();
     }
 
-    // Se alguma cfg mudou e está em MANUAL, aplica
+    // aplica pendências (caso tenha vindo CFG e marcado dirty)
     actuators_apply_if_dirty();
-
-    // QoS retries (ex: HELLO)
-    mesh_proto_qos_poll();
 }
