@@ -20,7 +20,7 @@ static const char *TAG = "ENV_CTRL";
 #define ENV_NODE_EXT            "ext-sen-00"
 
 // ---- Setpoints principais
-static const float ENV_TEMP_SP_C         = 26.0f;
+static const float ENV_TEMP_SP_C         = 27.0f;
 static const float ENV_TEMP_HYST_C       = 2.0f;
 
 static const int   ENV_LUX_SP            = 1500;   // lux desejado no sensor interno
