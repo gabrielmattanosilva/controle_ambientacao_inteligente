@@ -11,7 +11,7 @@ Recebe comandos CFG via malha e publica estado (STATE) + heartbeat (HB).
 ---
 
 ## 📸 Foto do módulo (placeholder)
-![Foto do módulo](../../docs/img/atuador.png)
+![Foto do módulo](../../doc/img/atuador.png)
 
 ---
 

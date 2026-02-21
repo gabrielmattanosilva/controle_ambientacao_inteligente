@@ -9,7 +9,7 @@ ESP32 responsável por:
 ---
 
 ## 📸 Foto do módulo
-![Foto do módulo](../../docs/img/gateway.png)
+![Foto do módulo](../../doc/img/gateway.png)
 
 ---
 

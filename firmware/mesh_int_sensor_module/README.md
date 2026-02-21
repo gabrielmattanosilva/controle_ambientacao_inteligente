@@ -10,7 +10,7 @@ Publica telemetria para o `mesh_gateway_module`.
 ---
 
 ## 📸 Foto do módulo (placeholder)
-![Foto do módulo](../../docs/img/sensor_interno.png)
+![Foto do módulo](../../doc/img/sensor_interno.png)
 
 ---
 

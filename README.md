@@ -19,27 +19,27 @@ A operação pode ser **automática (AUTO)** ou **manual (MANUAL)**, com acompan
 ## 📸 Visão geral (fotos e diagramas)
 
 ### Diagrama do sistema
-![Diagrama do sistema](docs/img/diagrama.jpg)
+![Diagrama do sistema](doc/img/diagrama.jpg)
 
 ### Fotos dos módulos
 
 **Gateway**  
-![Gateway](docs/img/gateway.png)
+![Gateway](doc/img/gateway.png)
 
 **Sensor Externo**  
-![Sensor Externo](docs/img/sensor_externo.png)
+![Sensor Externo](doc/img/sensor_externo.png)
 
 **Sensor Interno**  
-![Sensor Interno](docs/img/hw_sensor_interno.png)
+![Sensor Interno](doc/img/sensor_interno.png)
 
 **Atuador**  
-![Atuador](docs/img/atuador.png)
+![Atuador](doc/img/atuador.png)
 
 **Estufa (montagem geral)**  
-![Estufa](docs/img/estufa.png)
+![Estufa](doc/img/estufa.png)
 
 ### Dashboard Blynk
-![Dashboard Blynk](docs/img/dashbord_blynk.png)
+![Dashboard Blynk](doc/img/dashbord_blynk.png)
 
 ---
 
@@ -79,7 +79,7 @@ controle_ambientacao_inteligente/
 ├─ README.md
 ├─ LICENSE
 ├─ .gitignore
-├─ docs/
+├─ doc/
 │  ├─ README.md
 │  ├─ relatorio_final.pdf           # entrega principal (opcional no repo)
 │  ├─ img/                          # placeholders e evidências (fotos/prints)
@@ -115,7 +115,7 @@ controle_ambientacao_inteligente/
 
 | Componente | Qtd | Observação |
 |---|---:|---|
-| ESP32‑WROOM‑32 (DevKit / esp32doit-devkit-v1) | 5 | Um por módulo, exeto modulo Gateway que utiliza 2 |
+| ESP32‑WROOM‑32 (DevKit / esp32doit-devkit-v1) | 5 | Um por módulo, exceto modulo Gateway que utiliza 2 |
 | Sensor AHT20 (temp/umidade) | 2 | I2C — sensores interno e externo |
 | Sensor BH1750 (luminosidade) | 2 | I2C — sensores interno e externo |
 | Sensor capacitivo umidade de solo | 1 | Analógico — sensor interno |
